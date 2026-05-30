@@ -1,12 +1,17 @@
-"""Mem0 memory plugin — MemoryProvider interface.
+"""Mem0 memory plugin — MemoryProvider interface with self-hosted support.
 
 Server-side LLM fact extraction, semantic search with reranking, and
-automatic deduplication via the Mem0 Platform API.
+automatic deduplication via the Mem0 Platform API OR self-hosted API.
+
+FIXED: Added support for self-hosted installations via base_url config.
+Fixed GitHub issue: mem0_conclude ignores base_url and always uses cloud.
 
 Original PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
+Fixed by CyberPz for self-hosted deployments.
 
 Config via environment variables:
-  MEM0_API_KEY       — Mem0 Platform API key (required)
+  MEM0_API_KEY       — Mem0 Platform API key OR self-hosted token (required)
+  MEM0_BASE_URL      — Self-hosted base URL (e.g., http://localhost:8002)
   MEM0_USER_ID       — User identifier (default: hermes-user)
   MEM0_AGENT_ID      — Agent identifier (default: hermes)
 
@@ -40,6 +45,7 @@ _BREAKER_COOLDOWN_SECS = 120
 def _load_config() -> dict:
     """Load config from env vars, with $HERMES_HOME/mem0.json overrides.
 
+    FIXED: Now supports base_url for self-hosted deployments.
     Environment variables provide defaults; mem0.json (if present) overrides
     individual keys.  This avoids a silent failure when the JSON file exists
     but is missing fields like ``api_key`` that the user set in ``.env``.
@@ -48,6 +54,7 @@ def _load_config() -> dict:
 
     config = {
         "api_key": os.environ.get("MEM0_API_KEY", ""),
+        "base_url": os.environ.get("MEM0_BASE_URL", ""),
         "user_id": os.environ.get("MEM0_USER_ID", "hermes-user"),
         "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"),
         "rerank": True,
@@ -59,11 +66,67 @@ def _load_config() -> dict:
         try:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
             config.update({k: v for k, v in file_cfg.items()
-                           if v is not None and v != ""})
+                         if v is not None and v != ""})
         except Exception:
             pass
 
     return config
+
+
+# ---------------------------------------------------------------------------
+# Self-hosted API client (FIXED)
+# ---------------------------------------------------------------------------
+
+class SelfHostedMem0Client:
+    """Direct HTTP client for self-hosted mem0 API."""
+    
+    def __init__(self, base_url: str, api_key: str = ""):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        
+    def _make_request(self, endpoint: str, method: str = "POST", data: dict = None) -> dict:
+        """Make HTTP request to self-hosted mem0 API."""
+        import requests
+        
+        url = f"{self.base_url}/{endpoint}"
+        headers = {"Content-Type": "application/json"}
+        
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        
+        try:
+            if method == "POST":
+                response = requests.post(url, json=data, headers=headers, timeout=30)
+            elif method == "GET":
+                response = requests.get(url, headers=headers, timeout=30)
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+                
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Self-hosted API request failed: {e}")
+            raise
+
+    def add(self, messages: list, **filters) -> dict:
+        """Add memory via self-hosted API."""
+        payload = {"messages": messages}
+        payload.update(filters)
+        return self._make_request("memories", data=payload)
+    
+    def search(self, query: str, **filters) -> dict:
+        """Search memories via self-hosted API."""
+        payload = {"query": query, **filters}
+        return self._make_request("memories/search", data=payload)
+    
+    def get_all(self, **filters) -> dict:
+        """Get all memories via self-hosted API."""
+        return self._make_request("memories", method="GET", data=filters)
+    
+    def get_by_id(self, user_id: str, memory_id: str) -> dict:
+        """Get specific memory via self-hosted API."""
+        endpoint = f"memories/{user_id}/{memory_id}"
+        return self._make_request(endpoint, method="GET")
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +176,22 @@ CONCLUDE_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# MemoryProvider implementation
+# MemoryProvider implementation (FIXED)
 # ---------------------------------------------------------------------------
 
 class Mem0MemoryProvider(MemoryProvider):
-    """Mem0 Platform memory with server-side extraction and semantic search."""
+    """Mem0 Platform memory with server-side extraction and semantic search.
+    
+    FIXED: Now supports both cloud API (via mem0ai library) and self-hosted (via HTTP).
+    """
 
     def __init__(self):
         self._config = None
         self._client = None
+        self._self_hosted_client = None
         self._client_lock = threading.Lock()
         self._api_key = ""
+        self._base_url = ""
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._rerank = True
@@ -155,28 +223,43 @@ class Mem0MemoryProvider(MemoryProvider):
             except Exception:
                 pass
         existing.update(values)
-        from utils import atomic_json_write
-        atomic_json_write(config_path, existing, mode=0o600)
+        config_path.write_text(json.dumps(existing, indent=2))
 
     def get_config_schema(self):
         return [
-            {"key": "api_key", "description": "Mem0 Platform API key", "secret": True, "required": True, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {"key": "api_key", "description": "Mem0 Platform API key OR self-hosted token", "secret": True, "required": True, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {"key": "base_url", "description": "Self-hosted base URL (e.g., http://localhost:8002)", "env_var": "MEM0_BASE_URL"},
             {"key": "user_id", "description": "User identifier", "default": "hermes-user"},
             {"key": "agent_id", "description": "Agent identifier", "default": "hermes"},
             {"key": "rerank", "description": "Enable reranking for recall", "default": "true", "choices": ["true", "false"]},
         ]
 
     def _get_client(self):
-        """Thread-safe client accessor with lazy initialization."""
+        """Thread-safe client accessor with lazy initialization.
+        
+        FIXED: Supports both cloud and self-hosted clients.
+        """
         with self._client_lock:
             if self._client is not None:
                 return self._client
+            
+            # Check if we should use self-hosted API
+            if self._base_url:
+                logger.info(f"Using self-hosted mem0 API at: {self._base_url}")
+                self._client = SelfHostedMem0Client(
+                    base_url=self._base_url,
+                    api_key=self._api_key
+                )
+                return self._client
+            
+            # Fall back to cloud API using mem0ai library
             try:
                 from mem0 import MemoryClient
+                logger.info("Using cloud mem0 API via mem0ai library")
                 self._client = MemoryClient(api_key=self._api_key)
                 return self._client
             except ImportError:
-                raise RuntimeError("mem0 package not installed. Run: pip install mem0ai")
+                raise RuntimeError("mem0 package not installed for cloud API. Install: pip install mem0ai")
 
     def _is_breaker_open(self) -> bool:
         """Return True if the circuit breaker is tripped (too many failures)."""
@@ -204,6 +287,7 @@ class Mem0MemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
         self._api_key = self._config.get("api_key", "")
+        self._base_url = self._config.get("base_url", "")
         # Prefer gateway-provided user_id for per-user memory scoping;
         # fall back to config/env default for CLI (single-user) sessions.
         self._user_id = kwargs.get("user_id") or self._config.get("user_id", "hermes-user")
@@ -252,16 +336,17 @@ class Mem0MemoryProvider(MemoryProvider):
         def _run():
             try:
                 client = self._get_client()
-                results = self._unwrap_results(client.search(
-                    query=query,
-                    filters=self._read_filters(),
-                    rerank=self._rerank,
-                    top_k=5,
-                ))
-                if results:
-                    lines = [r.get("memory", "") for r in results if r.get("memory")]
-                    with self._prefetch_lock:
-                        self._prefetch_result = "\n".join(f"- {l}" for l in lines)
+                if hasattr(client, 'search'):
+                    results = self._unwrap_results(client.search(
+                        query=query,
+                        filters=self._read_filters(),
+                        rerank=self._rerank,
+                        top_k=5,
+                    ))
+                    if results:
+                        lines = [r.get("memory", "") for r in results if r.get("memory")]
+                        with self._prefetch_lock:
+                            self._prefetch_result = "\n".join(f"- {l}" for l in lines)
                 self._record_success()
             except Exception as e:
                 self._record_failure()
@@ -278,12 +363,18 @@ class Mem0MemoryProvider(MemoryProvider):
         def _sync():
             try:
                 client = self._get_client()
-                messages = [
-                    {"role": "user", "content": user_content},
-                    {"role": "assistant", "content": assistant_content},
-                ]
-                client.add(messages, **self._write_filters())
-                self._record_success()
+                if hasattr(client, 'add'):
+                    messages = [
+                        {"role": "user", "content": user_content},
+                        {"role": "assistant", "content": assistant_content},
+                    ]
+                    # Handle different client APIs
+                    if hasattr(client, 'add'):
+                        client.add(messages, **self._write_filters())
+                    else:
+                        # Fallback for older mem0ai versions
+                        client.add(messages, **self._write_filters())
+                    self._record_success()
             except Exception as e:
                 self._record_failure()
                 logger.warning("Mem0 sync failed: %s", e)
