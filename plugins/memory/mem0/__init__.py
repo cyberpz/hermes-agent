@@ -3,11 +3,8 @@
 Server-side LLM fact extraction, semantic search with reranking, and
 automatic deduplication via the Mem0 Platform API OR self-hosted API.
 
-FIXED: Added support for self-hosted installations via base_url config.
-Fixed GitHub issue: mem0_conclude ignores base_url and always uses cloud.
-
 Original PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
-Fixed by CyberPz for self-hosted deployments.
+Extended with self-hosted support and advanced error handling.
 
 Config via environment variables:
   MEM0_API_KEY       — Mem0 Platform API key OR self-hosted token (required)
@@ -45,7 +42,6 @@ _BREAKER_COOLDOWN_SECS = 120
 def _load_config() -> dict:
     """Load config from env vars, with $HERMES_HOME/mem0.json overrides.
 
-    FIXED: Now supports base_url for self-hosted deployments.
     Environment variables provide defaults; mem0.json (if present) overrides
     individual keys.  This avoids a silent failure when the JSON file exists
     but is missing fields like ``api_key`` that the user set in ``.env``.
@@ -74,7 +70,7 @@ def _load_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Self-hosted API client (FIXED)
+# Self-hosted API client
 # ---------------------------------------------------------------------------
 
 class SelfHostedMem0Client:
@@ -176,13 +172,13 @@ CONCLUDE_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# MemoryProvider implementation (FIXED)
+# MemoryProvider implementation
 # ---------------------------------------------------------------------------
 
 class Mem0MemoryProvider(MemoryProvider):
     """Mem0 Platform memory with server-side extraction and semantic search.
     
-    FIXED: Now supports both cloud API (via mem0ai library) and self-hosted (via HTTP).
+    Supports both cloud API (via mem0ai library) and self-hosted (via HTTP).
     """
 
     def __init__(self):
@@ -237,7 +233,7 @@ class Mem0MemoryProvider(MemoryProvider):
     def _get_client(self):
         """Thread-safe client accessor with lazy initialization.
         
-        FIXED: Supports both cloud and self-hosted clients.
+        Supports both cloud and self-hosted clients.
         """
         with self._client_lock:
             if self._client is not None:
