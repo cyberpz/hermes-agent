@@ -33,7 +33,9 @@ _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
 # delivered as a regular document.
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
 _TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
-_POST_DELIVERY_CALLBACK_TIMEOUT_SECONDS = 30.0
+_MEDIA_IMAGE_EXTS = frozenset({'.jpg', '.jpeg', '.png', '.webp', '.gif'})
+_MEDIA_VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
+_MEDIA_CERT_EXTS = frozenset({'.crt', '.der', '.pem', '.cer', '.p12', '.pfx'})
 
 
 def _platform_name(platform) -> str:
@@ -493,6 +495,34 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
 from hermes_constants import get_default_hermes_root, get_hermes_dir, get_hermes_home
+
+
+class MediaKind(Enum):
+    IMAGE = "image"
+    VIDEO = "video"
+    VOICE = "voice"
+    DOCUMENT = "document"
+
+
+def classify_media_kind(path, is_voice=False, platform=None, force_document=False) -> MediaKind:
+    """Map a local media path to the MediaKind a dispatcher should send it as.
+
+    Mirrors the reply path's routing (image/video by extension, audio via
+    should_send_media_as_audio). ``force_document`` wins, matching the
+    ``[[as_document]]`` directive; unknown extensions fall back to DOCUMENT.
+    """
+    if force_document:
+        return MediaKind.DOCUMENT
+    ext = Path(path).suffix.lower()
+    if ext in _MEDIA_IMAGE_EXTS:
+        return MediaKind.IMAGE
+    if ext in _MEDIA_VIDEO_EXTS:
+        return MediaKind.VIDEO
+    if ext in _MEDIA_CERT_EXTS:
+        return MediaKind.DOCUMENT
+    if should_send_media_as_audio(platform, ext, is_voice=is_voice):
+        return MediaKind.VOICE
+    return MediaKind.DOCUMENT
 
 
 GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
@@ -1245,6 +1275,30 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".ts": "text/plain",
     ".py": "text/plain",
     ".sh": "text/plain",
+    ".bat": "text/plain",
+    ".ps1": "text/plain",
+    ".cmd": "text/plain",
+    ".skill": "text/plain",
+    ".html": "text/html",
+    ".css": "text/css",
+    ".js": "text/plain",
+    ".ts": "text/plain",
+    ".sql": "text/plain",
+    ".env": "text/plain",
+    ".conf": "text/plain",
+    ".service": "text/plain",
+    ".desktop": "text/plain",
+    ".svg": "image/svg+xml",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".wav": "audio/wav",
+    ".mp4": "video/mp4",
+    ".mkv": "video/x-matroska",
+    ".webm": "video/webm",
+    ".7z": "application/x-7z-compressed",
+    ".tar": "application/x-tar",
+    ".gz": "application/gzip",
+    ".rar": "application/vnd.rar",
 }
 
 
@@ -1338,6 +1392,16 @@ MEDIA_DELIVERY_EXTS: Tuple[str, ...] = (
     ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".apk", ".ipa",
     # Web / rendered output
     ".html", ".htm",
+    # Scripts / code
+    ".bat", ".ps1", ".cmd", ".sh", ".py", ".js", ".ts", ".sql",
+    # Config / data
+    ".env", ".conf", ".cfg", ".ini", ".service", ".desktop", ".skill",
+    # Audio
+    ".mp3", ".wav", ".ogg", ".opus", ".m4a", ".flac",
+    # Video
+    ".mp4", ".mov", ".avi", ".mkv", ".webm",
+    # Archives extra
+    ".7z", ".rar",
 )
 
 # Regex alternation fragment of bare extensions (no leading dot), e.g.
@@ -2602,6 +2666,13 @@ class BasePlatformAdapter(ABC):
     # such as DingTalk AI Cards) override this to True (class attribute or
     # property) so the stream consumer knows not to short-circuit.
     REQUIRES_EDIT_FINALIZE: bool = False
+
+    # Media kinds this adapter natively DELIVERS via its send_* overrides.
+    # Fail-closed default: an adapter advertises nothing until it declares.
+    # Single source of truth for every media-dispatch site — declaring a kind
+    # you don't truly deliver re-opens the path-as-text leak, so the declared
+    # set is pinned by tests/gateway/test_media_kinds.py.
+    MEDIA_KINDS: frozenset[MediaKind] = frozenset()
 
     async def create_handoff_thread(
         self,

@@ -257,6 +257,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.whatsapp_common import WhatsAppBehaviorMixin
 from gateway.whatsapp_identity import to_whatsapp_jid
 from gateway.platforms.base import (
+    MediaKind,
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
@@ -334,7 +335,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
     provided by ``WhatsAppBehaviorMixin`` so the Cloud API adapter can
     share it. Only transport-specific code lives here.
     """
-
+    MEDIA_KINDS = frozenset({MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.VOICE, MediaKind.DOCUMENT})
     # Default bridge location resolved via shared helper
     _DEFAULT_BRIDGE_DIR = None  # resolved in __init__
     splits_long_messages = True  # send() chunks via truncate_message()

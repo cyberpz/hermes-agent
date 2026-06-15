@@ -97,6 +97,7 @@ except Exception:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator
 from gateway.platforms.base import (
+    MediaKind,
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
@@ -164,6 +165,7 @@ class DingTalkAdapter(BasePlatformAdapter):
     - Session webhook caching with expiry tracking
     - Markdown formatted replies
     """
+    MEDIA_KINDS = frozenset()
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
 

@@ -1,0 +1,14 @@
+{
+  "name": "documents",
+  "label": "Documents",
+  "description": "Generate documents (PDF, DOCX, HTML, Markdown, CSV, XLSX) and run RAG search with paragraph-level citations.",
+  "icon": "FileText",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/documents",
+    "position": "after:library"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

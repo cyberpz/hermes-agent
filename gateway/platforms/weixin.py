@@ -58,6 +58,7 @@ except ImportError:  # pragma: no cover - dependency gate
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator
 from gateway.platforms.base import (
+    MediaKind,
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
@@ -1137,6 +1138,7 @@ async def qr_login(
 
 class WeixinAdapter(BasePlatformAdapter):
     """Native Hermes adapter for Weixin personal accounts."""
+    MEDIA_KINDS = frozenset({MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.VOICE, MediaKind.DOCUMENT})
 
     supports_code_blocks = True  # Weixin renders fenced code blocks
     splits_long_messages = True  # send() chunks via _split_text()

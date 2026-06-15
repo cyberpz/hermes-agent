@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from gateway.platforms.base import (
+    MediaKind,
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
@@ -305,6 +306,7 @@ def _extract_attachments(
 
 class EmailAdapter(BasePlatformAdapter):
     """Email gateway adapter using IMAP (receive) and SMTP (send)."""
+    MEDIA_KINDS = frozenset({MediaKind.IMAGE, MediaKind.DOCUMENT})
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.EMAIL)
@@ -835,6 +837,39 @@ class EmailAdapter(BasePlatformAdapter):
 
         logger.info("[Email] Sent multi-attachment email to %s (%d files)", to_addr, len(file_paths))
         return msg_id
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local image as a real MIME attachment.
+
+        The dispatcher's per-file IMAGE path (``_dispatch_media_one``) calls
+        ``send_image_file``; without this override email would inherit the
+        base stub and leak the local path as body text. Delegates to the same
+        attachment helper as ``send_document`` so the IMAGE and DOCUMENT paths
+        stay symmetric and honor the ``SendResult`` contract. (The batch
+        ``send_multiple_images`` override handles the reply/kanban paths.)
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            message_id = await loop.run_in_executor(
+                None,
+                self._send_email_with_attachment,
+                chat_id,
+                caption or "",
+                image_path,
+                None,
+            )
+            return SendResult(success=True, message_id=message_id)
+        except Exception as e:
+            logger.error("[Email] Send image file failed: %s", e)
+            return SendResult(success=False, error=str(e))
 
     async def send_document(
         self,

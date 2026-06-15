@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from hermes_cli import kanban_db as kb
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from gateway.platforms.base import MediaKind
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -538,6 +540,7 @@ async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path, m
 
     fake_adapter = MagicMock()
     fake_adapter.name = "telegram"
+    fake_adapter.MEDIA_KINDS = frozenset(MediaKind)  # telegram delivers all kinds
 
     sends: list = []
     images_uploaded: list = []
@@ -622,6 +625,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
 
     fake_adapter = MagicMock()
     fake_adapter.name = "telegram"
+    fake_adapter.MEDIA_KINDS = frozenset(MediaKind)  # telegram delivers all kinds
 
     documents_uploaded: list = []
 

@@ -91,6 +91,7 @@ except ImportError:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator
 from gateway.platforms.base import (
+    MediaKind,
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
@@ -689,6 +690,7 @@ def check_teams_requirements() -> bool:
 
 class TeamsAdapter(BasePlatformAdapter):
     """Microsoft Teams adapter using the microsoft-teams-apps SDK."""
+    MEDIA_KINDS = frozenset({MediaKind.IMAGE})
 
     MAX_MESSAGE_LENGTH = 28000  # Teams text message limit (~28 KB)
     splits_long_messages = True  # send() chunks via truncate_message()

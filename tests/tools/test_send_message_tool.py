@@ -3097,3 +3097,329 @@ class TestSendTelegramThreadNotFoundRetry:
         finally:
             if media_path and os.path.exists(media_path):
                 os.unlink(media_path)
+
+
+class TestUnifiedCapabilityMedia:
+    """Media routing to any live adapter that declares MEDIA_KINDS.
+
+    Covers the platforms that are media-capable but NOT in the seven
+    hand-tuned branches (qqbot is the headline #23760 case), and the
+    fail-loud skip-and-warn contract for kinds an adapter cannot deliver.
+    """
+
+    @staticmethod
+    def _install_runner(monkeypatch, adapter):
+        runner = SimpleNamespace(adapters={Platform.QQBOT: adapter})
+        monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: runner)
+
+    @staticmethod
+    def _good_path(tmp_path, name="a.png"):
+        p = tmp_path / name
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        return str(p)
+
+    def test_qqbot_media_dispatches_via_live_adapter(self, tmp_path, monkeypatch):
+        from gateway.platforms.base import MediaKind, SendResult
+
+        sent = {}
+
+        class FakeQQ:
+            MEDIA_KINDS = frozenset(MediaKind)
+
+            async def send(self, chat_id, content, metadata=None):
+                sent["text"] = content
+                return SendResult(success=True, message_id="m0")
+
+            async def send_image_file(self, chat_id, image_path, **kw):
+                sent["image"] = image_path
+                return SendResult(success=True, message_id="m1")
+
+        self._install_runner(monkeypatch, FakeQQ())
+        path = self._good_path(tmp_path)
+        res = asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "chan", "hi",
+            media_files=[(path, False)],
+        ))
+        assert sent["image"] == path
+        assert sent["text"] == "hi"
+        assert res["success"]
+
+    def test_unsupported_kind_warns_and_skips_without_leak(self, tmp_path, monkeypatch):
+        from gateway.platforms.base import MediaKind, SendResult
+
+        class FakeVoiceOnly:
+            MEDIA_KINDS = frozenset({MediaKind.VOICE})
+            text = None
+
+            async def send(self, chat_id, content, metadata=None):
+                self.text = content
+                return SendResult(success=True, message_id="m0")
+
+            async def send_document(self, chat_id, file_path, **kw):
+                raise AssertionError("document must not be dispatched")
+
+        adapter = FakeVoiceOnly()
+        self._install_runner(monkeypatch, adapter)
+        pdf = tmp_path / "a.pdf"
+        pdf.write_text("x", encoding="utf-8")
+        res = asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "c", "hi",
+            media_files=[(str(pdf), False)],
+        ))
+        assert "a.pdf" not in (adapter.text or "")
+        assert any("a.pdf" in w for w in res["warnings"])
+        assert res["success"]
+
+    def test_security_gate_drops_unsafe_path(self, tmp_path, monkeypatch):
+        from gateway.platforms.base import MediaKind, SendResult
+
+        monkeypatch.setattr(
+            "gateway.platforms.base.validate_media_delivery_path",
+            lambda p: None if "EVIL" in str(p) else str(p),
+        )
+        dispatched = []
+
+        class FakeQQ:
+            MEDIA_KINDS = frozenset(MediaKind)
+
+            async def send(self, chat_id, content, metadata=None):
+                return SendResult(success=True, message_id="m0")
+
+            async def send_image_file(self, chat_id, image_path, **kw):
+                dispatched.append(image_path)
+                return SendResult(success=True, message_id="m1")
+
+        self._install_runner(monkeypatch, FakeQQ())
+        good = self._good_path(tmp_path)
+        asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "c", "hi",
+            media_files=[("/tmp/EVIL.png", False), (good, False)],
+        ))
+        assert dispatched == [good]
+
+    def test_force_document_routes_to_send_document(self, tmp_path, monkeypatch):
+        from gateway.platforms.base import MediaKind, SendResult
+
+        sent = {}
+
+        class FakeQQ:
+            MEDIA_KINDS = frozenset(MediaKind)
+
+            async def send(self, chat_id, content, metadata=None):
+                return SendResult(success=True, message_id="m0")
+
+            async def send_image_file(self, chat_id, image_path, **kw):
+                raise AssertionError("image_file must not be used under force_document")
+
+            async def send_document(self, chat_id, file_path, **kw):
+                sent["doc"] = file_path
+                return SendResult(success=True, message_id="m1")
+
+        self._install_runner(monkeypatch, FakeQQ())
+        path = self._good_path(tmp_path)
+        asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "c", "hi",
+            media_files=[(path, False)], force_document=True,
+        ))
+        assert sent["doc"] == path
+
+    def test_thread_id_forwarded_to_send_method(self, tmp_path, monkeypatch):
+        from gateway.platforms.base import MediaKind, SendResult
+
+        seen = {}
+
+        class FakeQQ:
+            MEDIA_KINDS = frozenset(MediaKind)
+
+            async def send(self, chat_id, content, metadata=None):
+                return SendResult(success=True, message_id="m0")
+
+            async def send_image_file(self, chat_id, image_path, metadata=None, **kw):
+                seen["metadata"] = metadata
+                return SendResult(success=True, message_id="m1")
+
+        self._install_runner(monkeypatch, FakeQQ())
+        path = self._good_path(tmp_path)
+        asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "c", "hi",
+            media_files=[(path, False)], thread_id="t-9",
+        ))
+        assert seen["metadata"] == {"thread_id": "t-9"}
+
+    def test_out_of_process_no_live_adapter_falls_to_text_with_warning(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: None)
+        with patch("tools.send_message_tool._send_qqbot",
+                   new=AsyncMock(return_value={"success": True, "message_id": "t"})) as qq:
+            path = self._good_path(tmp_path)
+            res = asyncio.run(_send_to_platform(
+                Platform.QQBOT, SimpleNamespace(extra={}), "c", "hi",
+                media_files=[(path, False)],
+            ))
+        qq.assert_awaited_once()
+        assert any("omitted" in w for w in res["warnings"])
+
+    def test_adapter_send_exception_returns_error_dict(self, tmp_path, monkeypatch):
+        from gateway.platforms.base import MediaKind, SendResult
+
+        class FakeQQ:
+            MEDIA_KINDS = frozenset(MediaKind)
+
+            async def send(self, chat_id, content, metadata=None):
+                return SendResult(success=True, message_id="m0")
+
+            async def send_image_file(self, chat_id, image_path, **kw):
+                raise RuntimeError("upload exploded")
+
+        self._install_runner(monkeypatch, FakeQQ())
+        path = self._good_path(tmp_path)
+        res = asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "c", "hi",
+            media_files=[(path, False)],
+        ))
+        assert "error" in res
+        assert "upload exploded" in res["error"]
+
+    def test_media_only_all_dropped_returns_explicit_error(self, monkeypatch):
+        from gateway.platforms.base import MediaKind, SendResult
+
+        monkeypatch.setattr(
+            "gateway.platforms.base.validate_media_delivery_path", lambda p: None
+        )
+
+        class FakeQQ:
+            MEDIA_KINDS = frozenset(MediaKind)
+
+            async def send(self, chat_id, content, metadata=None):
+                raise AssertionError("no text to send")
+
+        self._install_runner(monkeypatch, FakeQQ())
+        res = asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "c", "   ",
+            media_files=[("/tmp/EVIL.png", False)],
+        ))
+        assert res["error"]  # non-empty, explains nothing was delivered
+
+    def test_media_attaches_only_to_last_chunk(self, tmp_path, monkeypatch):
+        from gateway.platform_registry import platform_registry
+        from gateway.platforms.base import BasePlatformAdapter, MediaKind, SendResult
+
+        # Force a deterministic two-chunk split (give qqbot a tiny length limit
+        # via the registry, then stub the splitter) so we can prove the image
+        # is dispatched once, AFTER the final text chunk — never glued to an
+        # earlier chunk.
+        monkeypatch.setattr(platform_registry, "get",
+                            lambda name: SimpleNamespace(max_message_length=5))
+        monkeypatch.setattr(BasePlatformAdapter, "truncate_message",
+                            staticmethod(lambda *a, **k: ["c1", "c2"]))
+        events = []
+
+        class FakeQQ:
+            MEDIA_KINDS = frozenset(MediaKind)
+
+            async def send(self, chat_id, content, metadata=None):
+                events.append(("text", content))
+                return SendResult(success=True, message_id="m0")
+
+            async def send_image_file(self, chat_id, image_path, **kw):
+                events.append(("image", image_path))
+                return SendResult(success=True, message_id="m1")
+
+        self._install_runner(monkeypatch, FakeQQ())
+        path = self._good_path(tmp_path)
+        res = asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "c", "long message",
+            media_files=[(path, False)],
+        ))
+        assert events == [("text", "c1"), ("text", "c2"), ("image", path)]
+        assert res["success"]
+
+    def test_partial_delivery_returns_success_with_skip_warning(self, tmp_path, monkeypatch):
+        from gateway.platforms.base import MediaKind, SendResult
+
+        # IMAGE declared, DOCUMENT not: the image delivers, the pdf is skipped,
+        # and the successful result still carries the skip warning.
+        delivered = []
+
+        class FakeImageOnly:
+            MEDIA_KINDS = frozenset({MediaKind.IMAGE})
+
+            async def send(self, chat_id, content, metadata=None):
+                return SendResult(success=True, message_id="m0")
+
+            async def send_image_file(self, chat_id, image_path, **kw):
+                delivered.append(image_path)
+                return SendResult(success=True, message_id="img-1")
+
+            async def send_document(self, chat_id, file_path, **kw):
+                raise AssertionError("document must not be dispatched")
+
+        self._install_runner(monkeypatch, FakeImageOnly())
+        png = self._good_path(tmp_path, "shot.png")
+        pdf = tmp_path / "report.pdf"
+        pdf.write_text("x", encoding="utf-8")
+        res = asyncio.run(_send_to_platform(
+            Platform.QQBOT, SimpleNamespace(extra={}), "c", "hi",
+            media_files=[(png, False), (str(pdf), False)],
+        ))
+        assert delivered == [png]
+        assert res["success"]
+        assert res["message_id"] == "img-1"  # last successful delivery wins
+        assert any("report.pdf" in w for w in res["warnings"])
+
+
+class TestSevenBranchMediaRegression:
+    """The seven hand-tuned media branches keep handling media themselves and
+    must never fall through to the unified capability branch (which is the
+    only path that consults _resolve_live_adapter)."""
+
+    @pytest.mark.parametrize("platform,sender", [
+        (Platform.TELEGRAM, "_send_telegram"),
+        (Platform.WEIXIN, "_send_weixin"),
+        (Platform.MATRIX, "_send_matrix_via_adapter"),
+        (Platform.SIGNAL, "_send_signal"),
+        (Platform.YUANBAO, "_send_yuanbao"),
+        (Platform.FEISHU, "_send_feishu"),
+    ])
+    def test_dedicated_branch_handles_media(self, platform, sender, monkeypatch):
+        recorded = {}
+
+        async def fake_sender(*args, **kwargs):
+            recorded["media"] = kwargs.get("media_files")
+            return {"success": True, "message_id": "x"}
+
+        resolve_calls = []
+        monkeypatch.setattr(f"tools.send_message_tool.{sender}", fake_sender)
+        monkeypatch.setattr("tools.send_message_tool._resolve_live_adapter",
+                            lambda p: resolve_calls.append(p))
+
+        res = asyncio.run(_send_to_platform(
+            platform, SimpleNamespace(token="t", extra={}), "c", "hi",
+            media_files=[("/tmp/a.png", False)],
+        ))
+        assert recorded["media"] == [("/tmp/a.png", False)]
+        assert res["success"]
+        assert resolve_calls == []  # unified branch never entered
+
+    def test_discord_branch_handles_media(self, monkeypatch):
+        resolve_calls = []
+        monkeypatch.setattr("tools.send_message_tool._resolve_live_adapter",
+                            lambda p: resolve_calls.append(p))
+        send_mock = AsyncMock(return_value={"success": True, "message_id": "d1"})
+        with _patch_discord_sender(send_mock):
+            res = asyncio.run(_send_to_platform(
+                Platform.DISCORD, SimpleNamespace(token="tok", extra={}), "chat", "hi",
+                media_files=[("/tmp/a.png", False)],
+            ))
+        assert res["success"]
+        assert send_mock.await_args.kwargs["media_files"] == [("/tmp/a.png", False)]
+        assert resolve_calls == []
+
+    def test_incapable_platform_no_live_adapter_warns_omitted_media(self, monkeypatch):
+        monkeypatch.setattr("tools.send_message_tool._resolve_live_adapter", lambda p: None)
+        with patch("tools.send_message_tool._send_dingtalk",
+                   new=AsyncMock(return_value={"success": True, "message_id": "t"})):
+            res = asyncio.run(_send_to_platform(
+                Platform.DINGTALK, SimpleNamespace(extra={}), "c", "hi",
+                media_files=[("/tmp/a.png", False)],
+            ))
+        assert any("omitted" in w for w in res["warnings"])

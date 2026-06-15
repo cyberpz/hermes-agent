@@ -618,6 +618,38 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     }
 
 
+def _resolve_live_adapter(platform):
+    """Return the live in-process adapter for *platform*, or None.
+
+    None covers both the out-of-process case (no gateway runner) and an
+    unconnected platform; callers fall back to the standalone path or warn.
+    """
+    try:
+        from gateway.run import _gateway_runner_ref
+        runner = _gateway_runner_ref()
+        return runner.adapters.get(platform) if runner is not None else None
+    except Exception:
+        return None
+
+
+async def _dispatch_media_one(adapter, kind, chat_id, path, metadata):
+    """Deliver one media file via the adapter's native send_* for *kind*."""
+    from gateway.platforms.base import MediaKind
+
+    match kind:
+        case MediaKind.IMAGE:
+            result = await adapter.send_image_file(chat_id=chat_id, image_path=path, metadata=metadata)
+        case MediaKind.VIDEO:
+            result = await adapter.send_video(chat_id=chat_id, video_path=path, metadata=metadata)
+        case MediaKind.VOICE:
+            result = await adapter.send_voice(chat_id=chat_id, audio_path=path, metadata=metadata)
+        case _:
+            result = await adapter.send_document(chat_id=chat_id, file_path=path, metadata=metadata)
+    if result.success:
+        return {"success": True, "message_id": result.message_id}
+    return {"error": f"Adapter media send failed: {result.error}"}
+
+
 async def _send_via_adapter(
     platform,
     pconfig,
@@ -895,6 +927,45 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 return result
             last_result = result
         return last_result
+
+    # --- Unified capability-gated media: any platform with a live adapter
+    # that declares the kind in MEDIA_KINDS. Runs AFTER the seven hand-tuned
+    # branches and BEFORE the text-only fallback, covering qqbot/slack/
+    # whatsapp/wecom/bluebubbles/email and in-process plugins. Undeliverable
+    # kinds are skipped with a warning rather than leaked as path-as-text. ---
+    if media_files:
+        adapter = _resolve_live_adapter(platform)
+        if adapter is not None and getattr(adapter, "MEDIA_KINDS", frozenset()):
+            from gateway.platforms.base import BasePlatformAdapter, classify_media_kind
+
+            safe = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+            metadata = {"thread_id": thread_id} if thread_id else None
+            warnings, last_result = [], None
+            try:
+                for i, chunk in enumerate(chunks):
+                    attach = safe if i == len(chunks) - 1 else []
+                    if chunk.strip():
+                        result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
+                        if not result.success:
+                            return {"error": f"Adapter send failed: {result.error}"}
+                        last_result = {"success": True, "message_id": result.message_id}
+                    for path, is_voice in attach:
+                        kind = classify_media_kind(path, is_voice, platform.value, force_document)
+                        if kind not in adapter.MEDIA_KINDS:
+                            warnings.append(f"{platform.value} cannot deliver {kind.value}: {path} (skipped)")
+                            continue
+                        last_result = await _dispatch_media_one(adapter, kind, chat_id, path, metadata)
+                        if last_result.get("error"):
+                            return last_result
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                return {"error": f"Adapter media send failed: {e}"}
+            if last_result is None:  # nothing delivered: every file unsupported or dropped as unsafe
+                return {"error": "; ".join(warnings) or f"No deliverable media for {platform.value} (attachments were unsafe or unsupported)"}
+            if warnings and last_result.get("success"):
+                last_result["warnings"] = [*last_result.get("warnings", []), *warnings]
+            return last_result
 
     # --- Non-media platforms ---
     if media_files and not message.strip():

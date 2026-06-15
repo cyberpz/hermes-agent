@@ -1,0 +1,9 @@
+name: documents
+version: 0.1.0
+description: Document generation (PDF/DOCX/HTML/MD/CSV/XLSX) + RAG search with paragraph citations
+title: Documents
+icon: "📄"
+entrypoint: plugin.py
+ui:
+  path: /documents
+  directory: dashboard

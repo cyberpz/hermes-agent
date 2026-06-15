@@ -105,6 +105,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
 from utils import atomic_json_write, env_float
 from gateway.platforms.base import (
+    MediaKind,
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
@@ -728,6 +729,7 @@ class DiscordAdapter(BasePlatformAdapter):
     - Auto-threading for long conversations
     - Reaction-based feedback
     """
+    MEDIA_KINDS = frozenset({MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.VOICE, MediaKind.DOCUMENT})
 
     # Discord message limits
     MAX_MESSAGE_LENGTH = 2000

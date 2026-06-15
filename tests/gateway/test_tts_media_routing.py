@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.base import BasePlatformAdapter, MediaKind, MessageEvent, MessageType, SendResult
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource, build_session_key
 
@@ -137,6 +137,7 @@ async def test_streaming_delivery_routes_telegram_flac_media_tag_to_document_sen
     media_file = _allowed_media_path(tmp_path, monkeypatch, "speech.flac")
     adapter = SimpleNamespace(
         name="test",
+        MEDIA_KINDS=frozenset(MediaKind),  # telegram delivers all kinds
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -167,6 +168,7 @@ async def test_streaming_delivery_routes_non_voice_telegram_ogg_media_tag_to_doc
     media_file = _allowed_media_path(tmp_path, monkeypatch, "speech.ogg")
     adapter = SimpleNamespace(
         name="test",
+        MEDIA_KINDS=frozenset(MediaKind),  # telegram delivers all kinds
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -199,6 +201,7 @@ async def test_streaming_delivery_routes_telegram_mp3_media_tag_to_voice_sender(
     media_file = _allowed_media_path(tmp_path, monkeypatch, "speech.mp3")
     adapter = SimpleNamespace(
         name="test",
+        MEDIA_KINDS=frozenset(MediaKind),  # telegram delivers all kinds
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -243,6 +246,7 @@ async def test_streaming_delivery_blocks_media_path_outside_allowed_roots(tmp_pa
     monkeypatch.setenv("HERMES_MEDIA_TRUST_RECENT_FILES", "0")
     adapter = SimpleNamespace(
         name="test",
+        MEDIA_KINDS=frozenset(MediaKind),  # telegram delivers all kinds
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,

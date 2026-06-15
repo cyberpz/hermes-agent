@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Library</title>
+<style>
+  :root{--bg:#0f172a;--panel:#1e293b;--text:#e2e8f0;--muted:#94a3b8;--accent:#6366f1;--accent2:#818cf8;--danger:#ef4444;--success:#22c55e;--warn:#f59e0b;--border:#334155;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+  .container{max-width:1100px;margin:0 auto;padding:20px}
+  h1{font-size:1.5rem;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;align-items:center}
+  .toolbar-section{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  input,select,textarea,button{font-family:inherit;font-size:0.9rem;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--panel);color:var(--text)}
+  button{cursor:pointer;border:none;background:var(--accent);color:#fff;font-weight:500}
+  button:hover{opacity:.9}
+  button.secondary{background:var(--panel);border:1px solid var(--border);color:var(--text)}
+  button.danger{background:var(--danger)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;cursor:pointer;transition:border .15s;overflow:hidden}
+  .card:hover{border-color:var(--accent)}
+  .card img{width:100%;height:140px;object-fit:cover;border-radius:6px;margin-bottom:10px;background:var(--bg)}
+  .card h3{font-size:1rem;margin-bottom:6px;word-break:break-word}
+  .meta{font-size:0.8rem;color:var(--muted);margin-bottom:8px}
+  .tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .tag{font-size:0.75rem;padding:3px 8px;border-radius:12px;background:rgba(99,102,241,.15);color:var(--accent2)}
+  .folder-tag{background:rgba(34,197,94,.15);color:var(--success)}
+  .ocr-tag{background:rgba(245,158,11,.15);color:var(--warn)}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
+  .modal.active{display:flex}
+  .modal-box{background:var(--panel);border:1px solid var(--border);border-radius:10px;width:min(800px,94vw);max-height:90vh;overflow:auto;padding:20px}
+  .modal-box h2{margin-bottom:12px;font-size:1.1rem}
+  .form-group{margin-bottom:12px}
+  .form-group label{display:block;font-size:0.85rem;color:var(--muted);margin-bottom:4px}
+  .form-group input,.form-group select,.form-group textarea{width:100%}
+  .form-group textarea{min-height:200px;resize:vertical}
+  .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+  .empty{text-align:center;color:var(--muted);padding:40px 20px}
+  .search-hits{margin-top:12px}
+  .hit{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px}
+  .hit b{color:var(--accent2)}
+  .dropzone{border:2px dashed var(--border);border-radius:8px;padding:24px;text-align:center;color:var(--muted);cursor:pointer;transition:all .15s;margin-bottom:12px}
+  .dropzone.dragover{border-color:var(--accent);color:var(--accent2);background:rgba(99,102,241,.08)}
+  .status{font-size:0.85rem;color:var(--muted);margin-top:6px}
+  .preview-img{max-width:100%;max-height:300px;border-radius:6px;margin:10px 0}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📚 Library</h1>
+
+  <div class="toolbar">
+    <button onclick="openCreate()">+ New Doc</button>
+    <div class="toolbar-section">
+      <input id="urlInput" placeholder="https://..." style="min-width:240px" />
+      <button onclick="doScrape()">🌐 Scrape</button>
+    </div>
+    <input id="searchInput" placeholder="Search..." onkeydown="if(event.key==='Enter')doSearch()" />
+    <button onclick="doSearch()">🔍</button>
+    <select id="folderFilter" onchange="loadDocs()"><option value="">All folders</option></select>
+    <button class="secondary" onclick="clearSearch()">Clear</button>
+  </div>
+
+  <div id="dropzone" class="dropzone" onclick="document.getElementById('fileInput').click()">
+    📁 Drop file here or click to upload (txt, md, pdf, png, jpg)
+    <input type="file" id="fileInput" style="display:none" accept=".txt,.md,.pdf,.png,.jpg,.jpeg,.webp" onchange="handleFiles(this.files)" />
+    <div class="status" id="uploadStatus"></div>
+  </div>
+
+  <div id="docsGrid" class="grid"></div>
+  <div id="searchResults" class="search-hits" style="display:none"></div>
+</div>
+
+<div id="editorModal" class="modal">
+  <div class="modal-box">
+    <h2 id="editorTitle">New Document</h2>
+    <div class="form-group"><label>Title</label><input id="edTitle" /></div>
+    <div class="form-group"><label>Folder</label><input id="edFolder" value="default" /></div>
+    <div class="form-group"><label>Tags (comma separated)</label><input id="edTags" /></div>
+    <div class="form-group"><label>Content</label><textarea id="edContent"></textarea></div>
+    <div class="actions">
+      <button class="secondary" onclick="closeEditor()">Cancel</button>
+      <button id="saveBtn" onclick="saveDoc()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="viewModal" class="modal">
+  <div class="modal-box">
+    <h2 id="viewTitle"></h2>
+    <div class="meta" id="viewMeta"></div>
+    <div class="tags" id="viewTags"></div>
+    <img id="viewImage" class="preview-img" style="display:none" />
+    <pre id="viewContent" style="white-space:pre-wrap;margin-top:14px;background:#0f172a;padding:12px;border-radius:6px;border:1px solid var(--border);max-height:50vh;overflow:auto"></pre>
+    <div class="actions">
+      <button class="danger" onclick="deleteDoc()">Delete</button>
+      <button class="secondary" onclick="editCurrent()">Edit</button>
+      <button class="secondary" onclick="closeView()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/api/library';
+let docs = [];
+let currentId = null;
+
+async function loadDocs() {
+  const folder = document.getElementById('folderFilter').value;
+  const url = folder ? `${API}/docs?folder=${encodeURIComponent(folder)}` : `${API}/docs`;
+  const r = await fetch(url);
+  const data = await r.json();
+  docs = data.docs || [];
+  renderDocs();
+  loadFolders();
+}
+
+function renderDocs() {
+  const g = document.getElementById('docsGrid');
+  document.getElementById('searchResults').style.display = 'none';
+  if (!docs.length) { g.innerHTML = '<div class="empty">No documents yet.</div>'; return; }
+  g.innerHTML = docs.map(d => {
+    const isBinary = d.content_type === 'binary';
+    const isImage = isBinary && /\.(png|jpg|jpeg|webp|gif)$/i.test(d.file_ext||'');
+    const imgUrl = isImage ? `${API}/docs/${d.id}/file` : '';
+    const needsOcr = (d.tags||[]).includes('needs_ocr');
+    return `
+    <div class="card" onclick="openView('${d.id}')">
+      ${isImage ? `<img src="${imgUrl}" loading="lazy" onerror="this.style.display='none'" />` : ''}
+      <h3>${esc(d.title)}</h3>
+      <div class="meta">${fmtDate(d.updated_at)} · ${d.size||0} ${isBinary?'bytes':'chars'}</div>
+      <div class="tags">
+        <span class="tag folder-tag">📁 ${esc(d.folder||'default')}</span>
+        ${isBinary ? '<span class="tag">binary</span>' : ''}
+        ${needsOcr ? '<span class="tag ocr-tag">⚠️ needs OCR</span>' : ''}
+        ${(d.tags||[]).filter(t=>!['needs_ocr','image','pdf'].includes(t)).map(t=>`<span class="tag">${esc(t)}</span>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadFolders() {
+  const r = await fetch(`${API}/folders`);
+  const data = await r.json();
+  const sel = document.getElementById('folderFilter');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">All folders</option>' + (data.folders||[]).map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('');
+  sel.value = cur;
+}
+
+function openCreate() {
+  currentId = null;
+  document.getElementById('editorTitle').textContent = 'New Document';
+  document.getElementById('edTitle').value = '';
+  document.getElementById('edFolder').value = 'default';
+  document.getElementById('edTags').value = '';
+  document.getElementById('edContent').value = '';
+  document.getElementById('editorModal').classList.add('active');
+}
+
+function closeEditor() { document.getElementById('editorModal').classList.remove('active'); }
+function closeView() { document.getElementById('viewModal').classList.remove('active'); currentId = null; }
+
+async function saveDoc() {
+  const body = {
+    title: document.getElementById('edTitle').value,
+    folder: document.getElementById('edFolder').value || 'default',
+    tags: document.getElementById('edTags').value.split(',').map(s=>s.trim()).filter(Boolean),
+    content: document.getElementById('edContent').value,
+  };
+  const url = currentId ? `${API}/docs/${currentId}` : `${API}/docs`;
+  const method = currentId ? 'PUT' : 'POST';
+  const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!r.ok) { alert('Save failed'); return; }
+  closeEditor();
+  loadDocs();
+}
+
+async function openView(id) {
+  currentId = id;
+  const r = await fetch(`${API}/docs/${id}`);
+  const d = await r.json();
+  document.getElementById('viewTitle').textContent = d.title;
+  document.getElementById('viewMeta').textContent = `${d.folder||'default'} · ${d.content_type||'text'} · ${fmtDate(d.updated_at)}`;
+  document.getElementById('viewTags').innerHTML = (d.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join('');
+
+  const img = document.getElementById('viewImage');
+  const pre = document.getElementById('viewContent');
+
+  if (d.content_type === 'binary' && /\.(png|jpg|jpeg|webp|gif)$/i.test(d.file_ext||'')) {
+    img.src = `${API}/docs/${id}/file`;
+    img.style.display = 'block';
+    pre.style.display = 'none';
+  } else if (d.content_type === 'binary') {
+    img.style.display = 'none';
+    pre.style.display = 'block';
+    pre.textContent = `[Binary file: ${d.source_file||d.file_ext}]\nUse Hermes vision tools to extract text.`;
+  } else {
+    img.style.display = 'none';
+    pre.style.display = 'block';
+    pre.textContent = d.content || '';
+  }
+  document.getElementById('viewModal').classList.add('active');
+}
+
+function editCurrent() {
+  closeView();
+  const d = docs.find(x=>x.id===currentId);
+  if(!d) return;
+  if (d.content_type === 'binary') { alert('Binary docs cannot be edited as text. Delete and re-upload.'); return; }
+  document.getElementById('editorTitle').textContent = 'Edit Document';
+  document.getElementById('edTitle').value = d.title;
+  document.getElementById('edFolder').value = d.folder||'default';
+  document.getElementById('edTags').value = (d.tags||[]).join(', ');
+  fetch(`${API}/docs/${currentId}`).then(r=>r.json()).then(full=>{
+    document.getElementById('edContent').value = full.content||'';
+    document.getElementById('editorModal').classList.add('active');
+  });
+}
+
+async function deleteDoc() {
+  if (!confirm('Delete this document?')) return;
+  await fetch(`${API}/docs/${currentId}`, { method: 'DELETE' });
+  closeView();
+  loadDocs();
+}
+
+async function doSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) return;
+  const folder = document.getElementById('folderFilter').value || undefined;
+  const r = await fetch(`${API}/search`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({query: q, top_k: 10, folder})
+  });
+  const data = await r.json();
+  const container = document.getElementById('searchResults');
+  document.getElementById('docsGrid').innerHTML = '';
+  container.style.display = 'block';
+  if (!data.results || !data.results.length) { container.innerHTML = '<div class="empty">No results.</div>'; return; }
+  container.innerHTML = '<h3 style="margin-bottom:10px">🔍 Results</h3>' + data.results.map(h=>`
+    <div class="hit" onclick="openView('${esc(h.payload.doc_id)}')">
+      <b>${esc(h.payload.title)}</b> <span style="color:var(--muted);font-size:.8rem">score ${h.score.toFixed(3)}</span><br/>
+      <span style="color:var(--muted);font-size:.85rem">${esc(h.payload.text.substring(0,200))}...</span>
+    </div>`).join('');
+}
+
+async function doScrape() {
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) return;
+  const btn = event.target; btn.disabled = true; btn.textContent = 'Scraping...';
+  try {
+    const r = await fetch(`${API}/scrape`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url, folder:'web', tags:[]})
+    });
+    if (!r.ok) throw new Error('Failed');
+    document.getElementById('urlInput').value = '';
+    loadDocs();
+  } catch(e) {
+    alert('Scrape failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '🌐 Scrape';
+  }
+}
+
+function clearSearch() {
+  document.getElementById('searchInput').value = '';
+  document.getElementById('searchResults').style.display = 'none';
+  loadDocs();
+}
+
+const dz = document.getElementById('dropzone');
+['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev, e=>{e.preventDefault();dz.classList.add('dragover');}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev, e=>{e.preventDefault();dz.classList.remove('dragover');}));
+dz.addEventListener('drop', e=>{ if(e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); });
+
+async function handleFiles(files) {
+  const status = document.getElementById('uploadStatus');
+  for (const file of files) {
+    status.textContent = `Uploading ${file.name}...`;
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('folder', 'uploads');
+    try {
+      const r = await fetch(`${API}/upload`, {method:'POST', body:fd});
+      if (!r.ok) throw new Error(await r.text());
+      status.textContent = `Saved ${file.name}`;
+    } catch(e) {
+      status.textContent = `Error ${file.name}: ${e.message}`;
+    }
+  }
+  setTimeout(()=>status.textContent='', 3000);
+  loadDocs();
+}
+
+function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+function fmtDate(s){ if(!s)return''; const d=new Date(s); return d.toLocaleString() }
+loadDocs();
+</script>
+</body>
+</html>

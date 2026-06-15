@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ title }}</title>
+  <style>
+    :root {
+      --color-primary: #0b5cff;
+      --midground: #f7f7f8;
+    }
+    body {
+      font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+      max-width: 820px;
+      margin: 2.4em auto;
+      padding: 0 1.4em;
+      line-height: 1.65;
+      color: #1a1a1a;
+    }
+    h1, h2, h3, h4 { color: #0a0a0a; line-height: 1.25; }
+    h1 { font-size: 2em; border-bottom: 2px solid var(--color-primary); padding-bottom: 0.3em; }
+    h2 { font-size: 1.5em; border-bottom: 1px solid #e5e5e5; padding-bottom: 0.25em; margin-top: 1.6em; }
+    h3 { font-size: 1.2em; }
+    a { color: var(--color-primary); text-decoration: none; border-bottom: 1px solid transparent; }
+    a:hover { border-bottom-color: var(--color-primary); }
+    pre {
+      background: var(--midground);
+      padding: 1em 1.2em;
+      overflow-x: auto;
+      border-radius: 6px;
+      border-left: 3px solid var(--color-primary);
+    }
+    code {
+      font-family: "JetBrains Mono", Menlo, Consolas, monospace;
+      font-size: 0.88em;
+      background: var(--midground);
+      padding: 0.12em 0.35em;
+      border-radius: 3px;
+    }
+    pre code { background: transparent; padding: 0; }
+    table { border-collapse: collapse; width: 100%; margin: 1.2em 0; }
+    th, td { border: 1px solid #ddd; padding: 0.55em 0.8em; text-align: left; }
+    th { background: var(--midground); }
+    blockquote {
+      border-left: 3px solid var(--color-primary);
+      margin: 1.2em 0;
+      padding: 0.2em 1em;
+      color: #555;
+      background: var(--midground);
+    }
+    .meta {
+      color: #777;
+      font-size: 0.85em;
+      margin-bottom: 2em;
+    }
+  </style>
+</head>
+<body>
+  <h1>{{ title }}</h1>
+  {% if metadata.author or metadata.date or metadata.tags %}
+  <p class="meta">
+    {% if metadata.author %}by <strong>{{ metadata.author }}</strong>{% endif %}
+    {% if metadata.date %} · {{ metadata.date }}{% endif %}
+    {% if metadata.tags %} · {{ metadata.tags | join(', ') }}{% endif %}
+  </p>
+  {% endif %}
+  {{ body | safe }}
+  <hr>
+  <p class="meta">Generated {{ generated_at }} by Hermes Documents</p>
+</body>
+</html>
