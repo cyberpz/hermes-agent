@@ -1099,8 +1099,8 @@ class TelegramAdapter(BasePlatformAdapter):
         clients render a consistent font weight/spacing. The rich endpoint is
         reserved for constructs where raw markdown materially improves output:
         pipe tables (MarkdownV2 has no table syntax and rewrites them into
-        bullet lists), GFM task lists, collapsible ``<details>`` blocks, and
-        block math.  Adapted from #45995 (@YonganZhang).
+        bullet lists), GFM task lists, collapsible ``<details>`` blocks,
+        block math, headers, and fenced code blocks.
         """
         if not content:
             return False
@@ -1111,6 +1111,10 @@ class TelegramAdapter(BasePlatformAdapter):
         if re.search(r"(?m)^<details\b|^</details>|^<summary\b|^</summary>", content):
             return True
         if "$$" in content:
+            return True
+        if re.search(r"(?m)^#{1,6}\s+", content):
+            return True
+        if re.search(r"(?m)^\s*```\w*\s*$", content):
             return True
         return False
 
