@@ -184,12 +184,16 @@ class GatewayStreamConsumer:
     # Must stay in sync with cli.py _OPEN_TAGS/_CLOSE_TAGS and
     # run_agent.py _strip_think_blocks() tag variants.
     _OPEN_THINK_TAGS = (
-        "<REASONING_SCRATCHPAD>", "<think>", "<reasoning>",
+        "<REASONING_SCRATCHPAD>", "", "<reasoning>",
         "<THINKING>", "<thinking>", "<thought>",
+        "<think>", "<analysis>", "<reflection>",
+        "<step-by-step>", "<planning>", "<reasoning_process>",
     )
     _CLOSE_THINK_TAGS = (
-        "</REASONING_SCRATCHPAD>", "</think>", "</reasoning>",
+        "</REASONING_SCRATCHPAD>", "", "</reasoning>",
         "</THINKING>", "</thinking>", "</thought>",
+        "</think>", "</analysis>", "</reflection>",
+        "</step-by-step>", "</planning>", "</reasoning_process>",
     )
 
     # Class-wide monotonic counter for native-streaming draft ids.  Telegram
