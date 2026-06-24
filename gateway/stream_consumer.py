@@ -1171,7 +1171,7 @@ class GatewayStreamConsumer:
                             # continuation without dropping content.
                             break
                         self._accumulated = self._accumulated[split_at:].lstrip("\n")
-                        self._message_id = None
+                        # self._message_id = None  # Keep _message_id for smooth streaming
                         self._last_sent_text = ""
                         # Sealed head chunk delivered — this turn is now a
                         # multi-message delivery (#71643 record semantics).
