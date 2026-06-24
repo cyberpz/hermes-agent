@@ -1153,6 +1153,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         if "$$" in content:
             return True
+        if re.search(r"(?m)^#{1,6}\s+", content):
+            return True
+        if re.search(r"(?m)^\s*```\w*\s*$", content):
+            return True
         return False
 
     def _rich_eligible(self, content: str) -> bool:
