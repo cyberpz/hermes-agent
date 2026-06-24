@@ -1126,7 +1126,7 @@ class GatewayStreamConsumer:
                                 self._record_turn_final_payload(self._accumulated)
                             return
                         if got_segment_break:
-                            self._message_id = None
+                            # self._message_id = None  # Keep _message_id for smooth streaming across segments
                             self._fallback_final_send = False
                             self._fallback_prefix = ""
                             if not self._accumulated:
