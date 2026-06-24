@@ -21536,15 +21536,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         else:
             ctx_display = str(context_length)
 
+        # Rich Text format for Telegram, compact for other platforms
         lines = [
-            f"◆ Model: `{model}`",
-            f"◆ Provider: {provider or 'openrouter'}",
-            f"◆ Context: {ctx_display} tokens ({ctx_source})",
+            f"**Model:** `{model}`",
+            f"**Provider:** {provider or 'openrouter'}",
+            f"**Context:** {ctx_display} tokens ({ctx_source})",
         ]
 
         # Show endpoint for local/custom setups
         if base_url and base_url_hostname(base_url) in ("localhost", "127.0.0.1", "0.0.0.0"):
-            lines.append(f"◆ Endpoint: {base_url}")
+            lines.append(f"**Endpoint:** `{base_url}`")
 
         return "\n".join(lines)
 
