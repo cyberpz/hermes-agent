@@ -14734,14 +14734,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _code_block_full = f"{_block_header}```\n{_cmd_full}\n```"
                 # Single-line, capped preview for non-verbose modes.
                 _pl = get_tool_preview_max_len()
-                _cap = _pl if _pl > 0 else 40
-                _lines = _cmd_full.splitlines()
-                _cmd_short = _lines[0] if _lines else _cmd_full
-                _multiline = len(_lines) > 1
-                if len(_cmd_short) > _cap:
-                    _cmd_short = _cmd_short[:_cap - 3] + "..."
-                elif _multiline:
-                    _cmd_short = _cmd_short + " ..."
+                # Rich Text: use full command, no truncation
+                if getattr(_progress_adapter, "_rich_messages_enabled", False):
+                    _cmd_short = _cmd_full
+                    _multiline = len(_cmd_full.splitlines()) > 1
+                    if _multiline:
+                        _cmd_short = _cmd_full  # Keep full multiline command
+                else:
+                    _cap = _pl if _pl > 0 else 40
+                    _lines = _cmd_full.splitlines()
+                    _cmd_short = _lines[0] if _lines else _cmd_full
+                    _multiline = len(_lines) > 1
+                    if len(_cmd_short) > _cap:
+                        _cmd_short = _cmd_short[:_cap - 3] + "..."
+                    elif _multiline:
+                        _cmd_short = _cmd_short + " ..."
                 _code_block_short = f"{_block_header}```\n{_cmd_short}\n```"
 
             # Verbose mode: show detailed arguments, respects tool_preview_length
