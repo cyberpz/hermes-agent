@@ -484,9 +484,15 @@ def _rich_normalize_linebreaks(text: str) -> str:
     Paragraph breaks (``\\n\\n``), fenced code blocks, and GFM pipe-table
     blocks are left untouched: tables render natively in the rich path and a
     hard break injected into a row separator would corrupt the table.
+
+    Additionally, consecutive GFM tables are padded with an empty line
+    before and after each table block.  Without this separation Telegram's
+    rich renderer can merge adjacent tables into a malformed block.
     """
     if not text or '\n' not in text:
         return text
+
+    text = _pad_gfm_tables(text)
 
     out: list[str] = []
     # Split off protected regions (fenced code OR table blocks) and only inject
@@ -570,6 +576,50 @@ class _PollingLifecycleAbort(RuntimeError):
     """Internal control flow for polling startup fenced by teardown."""
 
 
+# Matches a GFM pipe table block: header row, delimiter row, optional data rows.
+# The leading (?:^|\n) is consumed so the match starts at the table's first row.
+_TABLE_BLOCK_RE = re.compile(
+    r'(?:^|\n)'
+    r'(?P<table>'
+    r'^[^\n]*\|[^\n]*\n'
+    r'[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+\|?[ \t]*'
+    r'(?:\n[^\n]*\|[^\n]*)*'
+    r')',
+    re.MULTILINE,
+)
+
+
+def _pad_gfm_tables(text: str) -> str:
+    """Ensure every GFM pipe-table block is separated by a blank line.
+
+    Telegram's rich renderer (and GFM parsing in general) can merge adjacent
+    tables when the first table's last row is directly followed by the second
+    table's header row.  Inserting a single empty line before and after each
+    detected table block prevents the corruption.
+    """
+    if '|' not in text or '-' not in text:
+        return text
+
+    out: list[str] = []
+    pos = 0
+    for m in _TABLE_BLOCK_RE.finditer(text):
+        before = text[pos:m.start()]
+        table = m.group('table')
+        if before and not before.endswith('\n\n'):
+            before = before.rstrip('\n') + '\n\n'
+        out.append(before)
+        out.append(table)
+        pos = m.end()
+
+    tail = text[pos:]
+    if tail:
+        if not tail.startswith('\n\n'):
+            tail = '\n\n' + tail.lstrip('\n')
+        out.append(tail)
+
+    return ''.join(out)
+
+
 class TelegramAdapter(BasePlatformAdapter):
     """
     Telegram bot adapter.
@@ -582,7 +632,9 @@ class TelegramAdapter(BasePlatformAdapter):
     """
 
     # Telegram message limits
-    MAX_MESSAGE_LENGTH = 4096
+    # Rich Text (Bot API 10.1) raises the single-message cap to 32,768 chars.
+    # MarkdownV2 legacy fallback still chunks at 4096 via truncate_message.
+    MAX_MESSAGE_LENGTH = 32768
     supports_code_blocks = True  # Telegram MarkdownV2 renders fenced code blocks
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     # Bot API 10.1 Rich Messages cap the raw markdown/html text at 32,768

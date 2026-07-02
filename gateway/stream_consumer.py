@@ -1650,7 +1650,7 @@ class GatewayStreamConsumer:
                 self._record_turn_final_payload(final_text)
                 return
 
-        raw_limit = getattr(self.adapter, "MAX_MESSAGE_LENGTH", 4096)
+        raw_limit = self._raw_message_limit()
         _len_fn: "Callable[[str], int]" = (
             self.adapter.message_len_fn
             if isinstance(self.adapter, _BasePlatformAdapter)
