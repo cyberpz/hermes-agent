@@ -1428,8 +1428,8 @@ def _generate_walkie_tone(duration: float = 0.5, output_path: Optional[str] = No
     """
     from hermes_constants import get_hermes_home
     hermes_home = str(get_hermes_home())
-    # Check stable asset location first; audio_cache is periodically cleaned.
-    for rel_dir in ("assets", "audio_cache"):
+    # Check stable asset locations first; audio_cache is periodically cleaned.
+    for rel_dir in ("projects/assets", "assets", "audio_cache"):
         asset = os.path.join(hermes_home, rel_dir, "walkie_open_tone.ogg")
         if os.path.isfile(asset) and os.path.getsize(asset) > 0:
             return asset
