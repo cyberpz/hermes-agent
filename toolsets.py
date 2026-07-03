@@ -358,6 +358,15 @@ TOOLSETS = {
         "includes": []
     },
 
+    "legalize": {
+        "description": "Ricerca e consultazione leggi italiane via Legalize.dev",
+        "tools": [
+            "search_italian_laws", "get_italian_law", "get_italian_law_meta",
+            "get_italian_law_types", "get_italian_law_reforms", "get_italian_law_commits",
+        ],
+        "includes": []
+    },
+
 
     # Scenario-specific toolsets
     

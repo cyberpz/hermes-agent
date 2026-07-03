@@ -492,8 +492,6 @@ def _rich_normalize_linebreaks(text: str) -> str:
     if not text or '\n' not in text:
         return text
 
-    text = _pad_gfm_tables(text)
-
     out: list[str] = []
     # Split off protected regions (fenced code OR table blocks) and only inject
     # hard breaks in the prose between them. Boundary newlines are handled by
@@ -506,7 +504,13 @@ def _rich_normalize_linebreaks(text: str) -> str:
         pos = m.end()
     tail = text[pos:]
     out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', tail))
-    return ''.join(out)
+
+    # After hard-break normalization, ensure consecutive GFM tables are padded
+    # with blank lines.  Doing this last preserves the protected-region boundary
+    # detection above; padding first would inject bare newlines that the
+    # hard-break pass could then turn into trailing double-spaces inside table
+    # rows, breaking Telegram's rich renderer.
+    return _pad_gfm_tables(''.join(out))
 
 
 # Watchdog bound for `await updater.stop()`. When the underlying TCP socket is
