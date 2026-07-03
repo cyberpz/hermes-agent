@@ -1412,9 +1412,8 @@ def _has_ffmpeg() -> bool:
 def _generate_walkie_tone(duration: float = 0.5, output_path: Optional[str] = None) -> Optional[str]:
     """Return the asset path for the walkie-talkie open-tone, or generate a fallback.
 
-    Priority:
-    1. User asset at ``~/.hermes/audio_cache/walkie_open_tone.ogg`` if it exists.
-    2. A short ffmpeg-generated 900 Hz sine chirp as fallback.
+    The user asset at ``~/projects/assets/walkie_open_tone.ogg`` is the only
+    source of truth. If it is missing, fall back to a generated 900 Hz chirp.
 
     Args:
         duration: Ignored when the user asset exists; used only for the
@@ -1426,13 +1425,20 @@ def _generate_walkie_tone(duration: float = 0.5, output_path: Optional[str] = No
         Path to an .ogg tone file, or ``None`` if no asset exists and ffmpeg
         is unavailable / generation fails.
     """
-    from hermes_constants import get_hermes_home
-    hermes_home = str(get_hermes_home())
-    # Check stable asset locations first; audio_cache is periodically cleaned.
-    for rel_dir in ("projects/assets", "assets", "audio_cache"):
-        asset = os.path.join(hermes_home, rel_dir, "walkie_open_tone.ogg")
-        if os.path.isfile(asset) and os.path.getsize(asset) > 0:
-            return asset
+    assets_dir = Path.home() / "projects" / "assets"
+    asset = str(assets_dir / "walkie_open_tone.ogg")
+    # Hardening: if the durable asset disappears (external cleanup, bug, etc.)
+    # auto-restore from the companion backup so voice messages keep the beep.
+    if not os.path.isfile(asset) or os.path.getsize(asset) == 0:
+        backup_asset = str(assets_dir / "walkie_open_tone_backup.ogg")
+        if os.path.isfile(backup_asset) and os.path.getsize(backup_asset) > 0:
+            try:
+                shutil.copy2(backup_asset, asset)
+                logger.warning("Walkie-tone asset missing; restored from backup: %s", asset)
+            except Exception as e:
+                logger.warning("Walkie-tone backup restore failed: %s", e)
+    if os.path.isfile(asset) and os.path.getsize(asset) > 0:
+        return asset
 
     if not _has_ffmpeg():
         return None
@@ -1525,8 +1531,13 @@ def _prepend_walkie_tone(audio_path: str, tone_duration: Optional[float] = None)
     except Exception as e:
         logger.warning("Walkie-tone prepend failed: %s", e, exc_info=True)
     finally:
+        # Only delete the tone if we generated a temp fallback. A user asset
+        # (e.g. ~/projects/assets/walkie_open_tone.ogg) must survive.
         try:
-            os.unlink(tone_path)
+            if tone_path and not Path(tone_path).resolve().is_relative_to(
+                (Path.home() / "projects" / "assets").resolve()
+            ):
+                os.unlink(tone_path)
         except OSError:
             pass
         try:
