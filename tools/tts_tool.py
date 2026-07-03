@@ -1409,6 +1409,133 @@ def _has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _generate_walkie_tone(duration: float = 0.5, output_path: Optional[str] = None) -> Optional[str]:
+    """Return the asset path for the walkie-talkie open-tone, or generate a fallback.
+
+    Priority:
+    1. User asset at ``~/.hermes/audio_cache/walkie_open_tone.ogg`` if it exists.
+    2. A short ffmpeg-generated 900 Hz sine chirp as fallback.
+
+    Args:
+        duration: Ignored when the user asset exists; used only for the
+            fallback generated tone.
+        output_path: Optional explicit output path. If omitted, a temp file
+            is created for the fallback tone.
+
+    Returns:
+        Path to an .ogg tone file, or ``None`` if no asset exists and ffmpeg
+        is unavailable / generation fails.
+    """
+    from hermes_constants import get_hermes_home
+    hermes_home = str(get_hermes_home())
+    # Check stable asset location first; audio_cache is periodically cleaned.
+    for rel_dir in ("assets", "audio_cache"):
+        asset = os.path.join(hermes_home, rel_dir, "walkie_open_tone.ogg")
+        if os.path.isfile(asset) and os.path.getsize(asset) > 0:
+            return asset
+
+    if not _has_ffmpeg():
+        return None
+    if output_path is None:
+        fd, output_path = tempfile.mkstemp(suffix=".ogg")
+        os.close(fd)
+    try:
+        # 900 Hz sine, mono, 64k opus. Fade in/out over 10 ms to avoid clicks.
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-f", "lavfi",
+                "-i", f"sine=frequency=900:duration={duration}",
+                "-af", "afade=t=in:ss=0:d=0.01,afade=t=out:st=0:d=0.01",
+                "-acodec", "libopus", "-ac", "1", "-b:a", "64k", "-vbr", "off",
+                output_path,
+            ],
+            capture_output=True, timeout=30,
+            stdin=subprocess.DEVNULL,
+            creationflags=windows_hide_flags(),
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Walkie-tone generation failed: %s",
+                result.stderr.decode("utf-8", errors="ignore")[:200],
+            )
+            return None
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            return output_path
+    except Exception as e:
+        logger.warning("Walkie-tone generation failed: %s", e, exc_info=True)
+    return None
+
+
+def _prepend_walkie_tone(audio_path: str, tone_duration: Optional[float] = None) -> Optional[str]:
+    """Prepend a walkie-talkie open-tone to an existing audio file.
+
+    The input may be MP3 or OGG/Opus. The output is written next to the
+    original file (``<name>_with_tone.<ext>``) and returned on success.
+
+    Args:
+        audio_path: Path to the generated TTS audio.
+        tone_duration: Optional override for the tone length. Defaults to
+            the value configured in ``voice.message_tone_duration`` or 0.5 s.
+
+    Returns:
+        Path to the combined audio file, or ``None`` if the operation fails.
+        On failure the caller should keep using the original ``audio_path``.
+    """
+    if not _has_ffmpeg():
+        return None
+
+    if tone_duration is None:
+        tone_duration = 0.5
+        try:
+            from hermes_cli.config import load_config
+            voice_cfg = load_config().get("voice", {})
+            if isinstance(voice_cfg, dict):
+                tone_duration = float(voice_cfg.get("message_tone_duration", 0.5))
+        except Exception:
+            pass
+
+    tone_path = _generate_walkie_tone(duration=tone_duration)
+    if not tone_path:
+        return None
+
+    base, ext = os.path.splitext(audio_path)
+    combined_path = f"{base}_with_tone{ext}"
+    concat_list_path = f"{base}_concat.txt"
+    try:
+        # ffmpeg concat demuxer requires safe paths; use file:// URI to be safe.
+        with open(concat_list_path, "w", encoding="utf-8") as f:
+            f.write(f"file '{os.path.abspath(tone_path)}'\n")
+            f.write(f"file '{os.path.abspath(audio_path)}'\n")
+
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", concat_list_path, "-acodec", "copy", combined_path],
+            capture_output=True, timeout=30,
+            stdin=subprocess.DEVNULL,
+            creationflags=windows_hide_flags(),
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Walkie-tone prepend failed: %s",
+                result.stderr.decode("utf-8", errors="ignore")[:200],
+            )
+            return None
+        if os.path.exists(combined_path) and os.path.getsize(combined_path) > 0:
+            return combined_path
+    except Exception as e:
+        logger.warning("Walkie-tone prepend failed: %s", e, exc_info=True)
+    finally:
+        try:
+            os.unlink(tone_path)
+        except OSError:
+            pass
+        try:
+            os.unlink(concat_list_path)
+        except OSError:
+            pass
+    return None
+
+
 def _convert_to_opus(mp3_path: str) -> Optional[str]:
     """
     Convert an audio file (MP3/WAV/anything ffmpeg reads) to OGG Opus
@@ -3462,6 +3589,21 @@ def _text_to_speech_single(
 
         file_size = os.path.getsize(file_str)
         logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)
+
+        # Optionally prepend a walkie-talkie open-tone to outgoing voice messages.
+        # This is controlled from ~/.hermes/config.yaml under the voice: section.
+        if voice_compatible:
+            try:
+                from hermes_cli.config import load_config
+                voice_cfg = load_config().get("voice", {})
+                if isinstance(voice_cfg, dict) and voice_cfg.get("message_open_tone", False):
+                    toned_path = _prepend_walkie_tone(file_str)
+                    if toned_path:
+                        file_str = toned_path
+                        file_size = os.path.getsize(file_str)
+                        logger.info("TTS audio with walkie-tone: %s (%s bytes)", file_str, f"{file_size:,}")
+            except Exception:
+                pass
 
         # Build response with MEDIA tag for platform delivery
         media_tag = f"MEDIA:{file_str}"
