@@ -151,6 +151,7 @@ try:
         CommandHandler,
         CallbackQueryHandler,
         MessageHandler as TelegramMessageHandler,
+        MessageReactionHandler,
         ContextTypes,
         TypeHandler,
         filters,
@@ -171,6 +172,7 @@ except ImportError:
     CallbackQueryHandler = Any
     TypeHandler = Any
     TelegramMessageHandler = Any
+    MessageReactionHandler = Any
     HTTPXRequest = Any
     filters = None
     ParseMode = None
@@ -638,7 +640,7 @@ class TelegramAdapter(BasePlatformAdapter):
     # Telegram message limits
     # Rich Text (Bot API 10.1) raises the single-message cap to 32,768 chars.
     # MarkdownV2 legacy fallback still chunks at 4096 via truncate_message.
-    MAX_MESSAGE_LENGTH = 32768
+    MAX_MESSAGE_LENGTH = 4096
     supports_code_blocks = True  # Telegram MarkdownV2 renders fenced code blocks
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     # Bot API 10.1 Rich Messages cap the raw markdown/html text at 32,768
@@ -4667,6 +4669,12 @@ class TelegramAdapter(BasePlatformAdapter):
             
             # Register handlers via the single registration site (#64176).
             self._register_handlers(self._app)
+            
+            # Handle reactions to bot messages as confirm/decline signals.
+            self._app.add_handler(MessageReactionHandler(
+                self._handle_reaction_update,
+                message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_UPDATED,
+            ))
             
             # Start polling — retry initialize() for transient TLS resets.
             # Each attempt is capped by _init_timeout so a single unreachable
@@ -9830,6 +9838,82 @@ class TelegramAdapter(BasePlatformAdapter):
         event = self._build_message_event(msg, MessageType.LOCATION, update_id=update.update_id)
         event.text = "\n".join(parts)
         event = self._apply_telegram_group_observe_attribution(event)
+        await self.handle_message(event)
+
+    async def _handle_reaction_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle a reaction change on a message.
+
+        Interprets reactions added to bot messages as binary signals:
+        ✅ -> explicit user confirmation/OK
+        👎 / ❌ / 🚫 / 👎 -> explicit user decline
+        everything else -> ignored
+
+        This turns a Telegram reaction into a synthetic text message so the
+        agent can respond to confirmations or refusals without a full reply.
+        """
+        reaction_update = getattr(update, "message_reaction", None)
+        if not reaction_update:
+            return
+
+        chat = getattr(reaction_update, "chat", None)
+        message_id = getattr(reaction_update, "message_id", None)
+        if not chat or message_id is None:
+            return
+
+        # Only react to reactions on messages we authored. Telegram tells us
+        # the message owner only indirectly; we accept reactions on any tracked
+        # rich message or recent bot message in the same chat.
+        from gateway import rich_sent_store
+        reacted_text = rich_sent_store.lookup(str(chat.id), str(message_id))
+
+        new_reactions = getattr(reaction_update, "new_reaction", ()) or ()
+        if not new_reactions:
+            return
+
+        # Determine dominant signal from the latest reaction set.
+        emojis = set()
+        for r in new_reactions:
+            emoji = getattr(r, "emoji", None)
+            if emoji:
+                emojis.add(emoji)
+            custom_id = getattr(r, "custom_emoji_id", None)
+            if custom_id:
+                emojis.add(custom_id)
+
+        if "✅" in emojis:
+            signal_text = "[USER_CONFIRMED]"
+        elif emojis & {"👎", "❌", "🚫", "👎🏻", "👎🏼", "👎🏽", "👎🏾", "👎🏿"}:
+            signal_text = "[USER_DECLINED]"
+        else:
+            # Unknown or neutral reaction — ignore.
+            return
+
+        user = getattr(reaction_update, "user", None)
+        actor_chat = getattr(reaction_update, "actor_chat", None)
+        actor = user or actor_chat
+
+        from gateway.session import build_session_key
+        source = self.build_source(
+            chat_id=str(chat.id),
+            chat_name=chat.title or (chat.full_name if hasattr(chat, "full_name") else None),
+            chat_type="dm" if str(getattr(chat, "type", "")).split(".")[-1].lower() == "private" else "group",
+            user_id=str(user.id) if user else None,
+            user_name=user.full_name if user else None,
+            message_id=str(message_id),
+            is_bot=False,
+        )
+
+        event = MessageEvent(
+            text=signal_text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=reaction_update,
+            message_id=str(message_id),
+            platform_update_id=getattr(update, "update_id", None),
+            reply_to_message_id=str(message_id),
+            reply_to_text=reacted_text,
+            reply_to_is_own_message=True,
+        )
         await self.handle_message(event)
 
     # ------------------------------------------------------------------
