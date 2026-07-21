@@ -349,9 +349,21 @@
 
     return React.createElement("div", {
       className: "ha-share-backdrop",
-      onClick: function (e) { if (e.target === e.currentTarget) onClose(); },
+      role: "presentation",
+      onMouseDown: function (e) {
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose();
+        }
+      },
     },
-      React.createElement("div", { className: "ha-share-dialog", role: "dialog", "aria-label": tx(t, "share.dialog_label", "Share achievement") },
+      React.createElement("div", {
+        className: "ha-share-dialog",
+        role: "dialog",
+        "aria-label": tx(t, "share.dialog_label", "Share achievement"),
+        onMouseDown: function (e) { e.stopPropagation(); },
+      },
         React.createElement("div", { className: "ha-share-head" },
           React.createElement("strong", null, tx(t, "share.header", "Share: {name}", { name: achievement.name })),
           React.createElement("button", { className: "ha-share-close", onClick: onClose, "aria-label": tx(t, "share.close", "Close") }, "×")
@@ -528,7 +540,12 @@
             React.createElement("span", { className: "ha-tier-badge" }, tierLabel),
             state === "unlocked" && React.createElement("button", {
               className: "ha-share-trigger",
-              onClick: function () { setShareOpen(true); },
+              type: "button",
+              onClick: function (e) {
+                e.stopPropagation();
+                e.preventDefault();
+                window.setTimeout(function () { setShareOpen(true); }, 0);
+              },
               title: tx(t, "card.share_title", "Share this achievement"),
               "aria-label": tx(t, "card.share_label", "Share {name}", { name: achievement.name }),
             }, tx(t, "card.share_text", "Share"))
@@ -600,12 +617,26 @@
 
     const achievements = (data && data.achievements) || [];
     const categories = ["All"].concat(Array.from(new Set(achievements.map(function (a) { return a.category; }))));
+    const [sortBy, setSortBy] = hooks.useState("tier-desc");
     const visible = achievements.filter(function (a) {
       if (category !== "All" && a.category !== category) return false;
       if (visibility === "unlocked" && a.state !== "unlocked") return false;
       if (visibility === "discovered" && a.state !== "discovered") return false;
       if (visibility === "secret" && a.state !== "secret") return false;
       return true;
+    }).slice().sort(function (a, b) {
+      const tierRank = { "Olympian": 5, "Diamond": 4, "Gold": 3, "Silver": 2, "Copper": 1, "": 0, null: 0, undefined: 0 };
+      if (sortBy === "tier-desc") {
+        const diff = (tierRank[b.tier] || 0) - (tierRank[a.tier] || 0);
+        if (diff !== 0) return diff;
+        return (a.name || "").localeCompare(b.name || "");
+      }
+      if (sortBy === "tier-asc") {
+        const diff = (tierRank[a.tier] || 0) - (tierRank[b.tier] || 0);
+        if (diff !== 0) return diff;
+        return (a.name || "").localeCompare(b.name || "");
+      }
+      return (a.name || "").localeCompare(b.name || "");
     });
     const unlocked = achievements.filter(function (a) { return a.state === "unlocked"; });
     const discovered = achievements.filter(function (a) { return a.state === "discovered"; });
@@ -699,7 +730,14 @@
         })),
         React.createElement("div", { className: "ha-pills" }, ["all", "unlocked", "discovered", "secret"].map(function (v) {
           return React.createElement("button", { key: v, onClick: function () { setVisibility(v); }, className: v === visibility ? "active" : "" }, visibilityLabels[v] || v);
-        }))
+        })),
+      React.createElement("div", { className: "ha-pills ha-sort-pills" }, [
+        { key: "tier-desc", label: "Tier ▼" },
+        { key: "tier-asc", label: "Tier ▲" },
+        { key: "name", label: "Name" }
+      ].map(function (s) {
+        return React.createElement("button", { key: s.key, onClick: function () { setSortBy(s.key); }, className: s.key === sortBy ? "active" : "" }, s.label);
+      }))
       ),
       latest.length > 0 && React.createElement("section", { className: "ha-latest" },
         React.createElement("h2", null, tx(t, "latest.header", "Recent unlocks")),

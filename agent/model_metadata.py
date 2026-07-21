@@ -554,6 +554,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     # still hit the generic 256K fallback.
     "kimi-k3": 1_048_576,
     "kimi": 262144,
+    # Kimi K3 — known 256K context window (matches moonshot.ai live metadata).
+    "k3": 262144,
     # Upstage Solar — api.upstage.ai/v1/models does not return context_length,
     # so these fallbacks keep token budgeting / compression from probing down
     # to the 128k default. Ids are matched longest-first, so dated variants

@@ -640,7 +640,7 @@ class TelegramAdapter(BasePlatformAdapter):
     # Telegram message limits
     # Rich Text (Bot API 10.1) raises the single-message cap to 32,768 chars.
     # MarkdownV2 legacy fallback still chunks at 4096 via truncate_message.
-    MAX_MESSAGE_LENGTH = 4096
+    MAX_MESSAGE_LENGTH = 32768
     supports_code_blocks = True  # Telegram MarkdownV2 renders fenced code blocks
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     # Bot API 10.1 Rich Messages cap the raw markdown/html text at 32,768
@@ -2118,20 +2118,17 @@ class TelegramAdapter(BasePlatformAdapter):
         return bool(getattr(self, "_rich_messages_enabled", True))
 
     def _rich_eligible(self, content: str) -> bool:
-        """Capability/content eligibility for rich, ignoring ``expect_edits``.
+        """Rich Text is the default. All messages are eligible.
 
-        Shared core of :meth:`_should_attempt_rich` minus the per-call
-        ``expect_edits`` metadata gate.  The rich EDIT-finalize path
-        (:meth:`_try_edit_rich`) needs this: a streamed preview is sent with
-        ``expect_edits=True`` to stay on the editable path mid-stream, but the
-        FINAL edit should still upgrade to rich when the content warrants it.
+        The legacy MarkdownV2 path is deprecated. Rich Text (Bot API 10.1+)
+        handles all constructs natively: tables, task lists, details, math,
+        headers, code blocks, bold, italic, links, spoilers, quotes.
         """
         return bool(
             self._rich_delivery_enabled()
             and not getattr(self, "_rich_send_disabled", False)
             and content
             and content.strip()
-            and self._needs_rich_rendering(content)
             and not self._has_telegram_desktop_details_math_crash_shape(content)
             and not self._has_telegram_desktop_cjk_rich_garble_shape(content)
             and self._content_fits_rich_limits(content)

@@ -766,7 +766,7 @@ class PlatformConfig:
 # breathe without bumping into rate limits, and a smaller buffer threshold
 # makes short replies feel near-instant in DMs.
 DEFAULT_STREAMING_EDIT_INTERVAL: float = 0.8
-DEFAULT_STREAMING_BUFFER_THRESHOLD: int = 24
+DEFAULT_STREAMING_BUFFER_THRESHOLD: int = 100
 DEFAULT_STREAMING_CURSOR: str = " ▉"
 
 
