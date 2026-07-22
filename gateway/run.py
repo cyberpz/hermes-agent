@@ -4982,18 +4982,19 @@ class TurnRunner:
                         progress_lines[-1] = f"{base_msg} (×{count + 1})"
                     msg = progress_lines[-1] if progress_lines else base_msg
                 elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
-                    # Content bubble just landed on the platform — close off
-                    # the current tool-progress bubble so the next tool
-                    # starts a fresh bubble below the content. Without this,
-                    # tool lines keep editing the ORIGINAL progress message
-                    # above the new content, making the chat appear out of
-                    # order. Mirrors GatewayStreamConsumer.on_segment_break
-                    # on the content side. (Issue: tool + content
-                    # linearization regression after PR #7885.)
-                    progress_msg_id = None
-                    progress_lines = []
-                    ctx.last_progress_msg[0] = None
-                    ctx.repeat_count[0] = 0
+                    # Content bubble just landed on the platform.
+                    # grouping="separate": close off the current tool-progress
+                    # bubble so the next tool starts a fresh bubble below the
+                    # content (linear chat order, pre-v0.9 style).
+                    # grouping="accumulate": keep ONE operational bubble for
+                    # the whole turn — all tool lines keep editing the same
+                    # message, so ops stay grouped instead of scattering into
+                    # many bubbles between content segments.
+                    if ctx.progress_grouping == "separate":
+                        progress_msg_id = None
+                        progress_lines = []
+                        ctx.last_progress_msg[0] = None
+                        ctx.repeat_count[0] = 0
                     continue
                 else:
                     msg = raw
@@ -5104,9 +5105,13 @@ class TurnRunner:
                                 progress_lines[-1] = f"{base_msg} (×{count + 1})"
                                 await _roll_progress_overflow_if_needed()
                         elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
-                            # Content-bubble marker during drain: close off
-                            # the current progress bubble and start a fresh
-                            # one for any tool lines that arrived after.
+                            # Content-bubble marker during drain.
+                            # grouping="separate": close off the current
+                            # progress bubble and start a fresh one for any
+                            # tool lines that arrived after.
+                            # grouping="accumulate": keep the single
+                            # per-turn ops bubble — just flush pending lines
+                            # into it via one final edit.
                             await _roll_progress_overflow_if_needed()
                             if can_edit and progress_lines and progress_msg_id:
                                 _pending_text = _progress_text(progress_lines)
@@ -5114,10 +5119,11 @@ class TurnRunner:
                                     await _edit_progress_message(progress_msg_id, _pending_text)
                                 except Exception:
                                     pass
-                            progress_msg_id = None
-                            progress_lines = []
-                            ctx.last_progress_msg[0] = None
-                            ctx.repeat_count[0] = 0
+                            if ctx.progress_grouping == "separate":
+                                progress_msg_id = None
+                                progress_lines = []
+                                ctx.last_progress_msg[0] = None
+                                ctx.repeat_count[0] = 0
                         else:
                             progress_lines.append(raw)
                             await _roll_progress_overflow_if_needed()
