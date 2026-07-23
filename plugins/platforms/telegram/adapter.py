@@ -2138,10 +2138,15 @@ class TelegramAdapter(BasePlatformAdapter):
     def _should_attempt_rich(
         self, content: str, metadata: Optional[Dict[str, Any]] = None
     ) -> bool:
-        return bool(
-            not (metadata or {}).get("expect_edits")
-            and self._rich_eligible(content)
-        )
+        """Rich Text is the default for ALL sends, including streaming previews.
+
+        Even with ``expect_edits=True`` (streaming/edit transport — the norm in
+        groups) the preview is BORN rich: ``editMessageText`` supports the
+        ``rich_message`` parameter (Bot API 10.1+), so progressive edits keep
+        the rich rendering from the first frame instead of flickering
+        MarkdownV2 → rich at finalize.
+        """
+        return bool(self._rich_eligible(content))
 
     def prefers_fresh_final_streaming(
         self, content: str, metadata: Optional[Dict[str, Any]] = None
@@ -5738,7 +5743,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # table that exceeds the MarkdownV2 limit must not be split into legacy
         # chunks.  Falls back to the legacy edit path (overflow split included)
         # on capability/permanent rejection.
-        if finalize and self._rich_eligible(content):
+        if self._rich_eligible(content):
             rich_result = await self._try_edit_rich(
                 chat_id, message_id, content, metadata=metadata,
             )

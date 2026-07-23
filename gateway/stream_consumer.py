@@ -661,6 +661,46 @@ class GatewayStreamConsumer:
                 type(self)._draft_id_counter += 1
                 self._draft_id = type(self)._draft_id_counter
 
+    def _monoblock_segments_enabled(self) -> bool:
+        """Keep ONE growing verbal message per turn across tool boundaries.
+
+        Edit-transport chats (Telegram groups, where draft streaming is
+        unavailable) used to reset ``_message_id`` on every segment break, so
+        each text segment between tool calls became its own visible bubble —
+        the "spezzettamento" of non-operational messages.  With a rich-capable
+        adapter we instead keep editing the SAME message: the accumulated text
+        already contains the previous segment, so the bubble simply keeps
+        growing (monoblock), exactly like the ops/progress bubble does.
+
+        Enabled only when:
+        - the adapter exposes rich delivery (``_rich_messages_enabled is True``
+          — strict check so MagicMock test doubles don't auto-enable it), and
+        - native draft streaming is NOT active (DMs keep the per-segment
+          draft → finalize behavior they already like).
+        """
+        if self._use_draft_streaming:
+            return False
+        return getattr(self.adapter, "_rich_messages_enabled", False) is True
+
+    def _carry_segment_into_monoblock(self) -> None:
+        """Soft-reset at a tool boundary WITHOUT dropping the current message.
+
+        Mirrors :meth:`_reset_segment_state` but preserves ``_message_id``,
+        ``_message_created_ts``, ``_accumulated`` and ``_last_sent_text`` so the
+        next segment continues editing (growing) the same bubble.  Delivered
+        text is archived for the gateway's dedup bookkeeping.
+        """
+        if self._last_sent_text:
+            finalized = self._clean_for_display(self._last_sent_text).strip()
+            if finalized:
+                self._delivered_segment_texts.append(finalized)
+        self._fallback_final_send = False
+        self._fallback_prefix = ""
+        self._fallback_preserve_partial_messages = False
+        self._segment_preview_message_ids = set()
+        self._final_response_sent = False
+        self._final_content_delivered = False
+
     def on_delta(self, text: str) -> None:
         """Thread-safe callback — called from the agent's worker thread.
 
@@ -1336,8 +1376,6 @@ class GatewayStreamConsumer:
                         self._stream_is_message()
                         and self._use_draft_streaming
                     ):
-                        pass
-                    else:
                         # If the segment-break edit failed to deliver the
                         # accumulated content (flood control that has not yet
                         # promoted to fallback mode, or fallback mode itself),
@@ -1353,6 +1391,12 @@ class GatewayStreamConsumer:
                             and self._message_id != "__no_edit__"
                         ):
                             await self._flush_segment_tail_on_edit_failure()
+                    if self._monoblock_segments_enabled():
+                        # Monoblock (Telegram rich, edit transport): keep the
+                        # same bubble growing across tool boundaries instead of
+                        # spawning one new message per text segment.
+                        self._carry_segment_into_monoblock()
+                    else:
                         self._reset_segment_state(preserve_no_edit=True)
 
                 # Flush barrier satisfied: the buffered segment (if any) has now

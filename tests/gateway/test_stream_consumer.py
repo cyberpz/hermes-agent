@@ -308,6 +308,98 @@ class TestBeforeFinalizeHook:
 # ── Segment break (tool boundary) tests ──────────────────────────────────
 
 
+class TestMonoblockSegments:
+    """With a rich-capable adapter (Telegram rich_messages=True) and edit
+    transport, segment breaks must NOT spawn one bubble per text segment:
+    the same message keeps growing (monoblock per turn)."""
+
+    def _make_rich_adapter(self):
+        adapter = MagicMock()
+        adapter._rich_messages_enabled = True  # strict bool — enables monoblock
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 32768
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_segment_break_keeps_same_message(self):
+        """After a tool boundary, the next segment edits the SAME bubble."""
+        adapter = self._make_rich_adapter()
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("Let me search for that...")
+        consumer.on_delta(None)  # tool boundary
+        consumer.on_delta("Here are the results.")
+        consumer.finish()
+
+        await consumer.run()
+
+        # ONE send only — never a second bubble for the second segment.
+        assert adapter.send.call_count == 1
+        # The final edit must contain BOTH segments (message keeps growing).
+        final_edit = adapter.edit_message.call_args_list[-1][1]["content"]
+        assert "search" in final_edit
+        assert "results" in final_edit
+
+    @pytest.mark.asyncio
+    async def test_multiple_segment_breaks_stay_monoblock(self):
+        """Several tool boundaries → still ONE message."""
+        adapter = self._make_rich_adapter()
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("First part.")
+        consumer.on_delta(None)
+        consumer.on_delta("Second part.")
+        consumer.on_delta(None)
+        consumer.on_delta("Third part.")
+        consumer.finish()
+
+        await consumer.run()
+
+        assert adapter.send.call_count == 1
+        final_edit = adapter.edit_message.call_args_list[-1][1]["content"]
+        assert "First" in final_edit
+        assert "Second" in final_edit
+        assert "Third" in final_edit
+
+    @pytest.mark.asyncio
+    async def test_non_rich_adapter_keeps_legacy_segment_behavior(self):
+        """Non-rich adapters keep the upstream one-bubble-per-segment flow."""
+        adapter = MagicMock()
+        adapter._rich_messages_enabled = False
+        adapter.REQUIRES_EDIT_FINALIZE = False
+        adapter.send = AsyncMock(
+            side_effect=[
+                SimpleNamespace(success=True, message_id="msg_1"),
+                SimpleNamespace(success=True, message_id="msg_2"),
+            ]
+        )
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("Preamble.")
+        consumer.on_delta(None)
+        consumer.on_delta("Answer.")
+        consumer.finish()
+
+        await consumer.run()
+
+        assert adapter.send.call_count == 2
+
+
+# ── Segment break (tool boundary) tests ──────────────────────────────────
+
+
 class TestSegmentBreakOnToolBoundary:
     """Verify that on_delta(None) finalizes the current message and starts a
     new one so the final response appears below tool-progress messages."""

@@ -305,7 +305,7 @@ async def test_plain_markdown_uses_rich_path_by_default():
 
 
 @pytest.mark.asyncio
-async def test_expect_edits_metadata_keeps_preview_on_legacy_path():
+async def test_expect_edits_metadata_preview_is_born_rich():
     adapter = _make_adapter()
 
     result = await adapter.send(
@@ -315,12 +315,14 @@ async def test_expect_edits_metadata_keeps_preview_on_legacy_path():
     )
 
     assert result.success is True
-    # Streaming preview sends will be edited later, so they must not be born as
-    # rich messages until Hermes wires rich_message edits directly.
+    # Streaming previews are BORN rich: editMessageText supports the
+    # rich_message parameter (Bot API 10.1+), so there is no reason to start
+    # on the legacy path and upgrade at finalize.
     bot = adapter._bot
     assert bot is not None
-    bot.do_api_request.assert_not_called()
-    bot.send_message.assert_awaited()
+    bot.do_api_request.assert_awaited_once()
+    assert bot.do_api_request.call_args.args[0] == "sendRichMessage"
+    bot.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1000,9 +1002,10 @@ async def test_finalize_edit_rich_not_modified_is_success_noop():
 
 
 @pytest.mark.asyncio
-async def test_non_finalize_edit_never_uses_rich():
-    """Intermediate (non-finalize) stream edits stay on the plain edit path;
-    rich is only applied on the final edit."""
+async def test_non_finalize_edit_uses_rich_too():
+    """Intermediate (non-finalize) stream edits also use the rich edit path —
+    Rich Text is the default for every edit, not just the final one, so
+    streaming keeps rich rendering from the first frame."""
     adapter = _make_adapter()
 
     result = await adapter.edit_message(
@@ -1010,8 +1013,9 @@ async def test_non_finalize_edit_never_uses_rich():
     )
 
     assert result.success is True
-    adapter._bot.do_api_request.assert_not_called()
-    adapter._bot.edit_message_text.assert_awaited()
+    api_kwargs = _rich_edit_kwargs(adapter)
+    assert api_kwargs["rich_message"]["markdown"] == RICH_CONTENT
+    adapter._bot.edit_message_text.assert_not_called()
 
 
 @pytest.mark.asyncio
