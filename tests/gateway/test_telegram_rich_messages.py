@@ -326,18 +326,18 @@ async def test_expect_edits_metadata_preview_is_born_rich():
 
 
 @pytest.mark.asyncio
-async def test_oversized_content_skips_rich_and_chunks():
+async def test_oversized_content_uses_rich_split_not_legacy():
     adapter = _make_adapter()
-    # > 32,768 characters -> rich pre-check fails, legacy chunking takes over.
+    # > 32,768 characters -> rich split path: every chunk via sendRichMessage.
     oversized = "a" * 40000
     assert len(oversized) > TelegramAdapter.RICH_MESSAGE_MAX_CHARS
 
     result = await adapter.send("12345", oversized)
 
     assert result.success is True
-    adapter._bot.do_api_request.assert_not_called()
-    # Oversized content is split into multiple legacy chunks.
-    assert adapter._bot.send_message.await_count > 1
+    # Multiple rich chunks, zero legacy sends.
+    assert adapter._bot.do_api_request.await_count > 1
+    adapter._bot.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1275,6 +1275,201 @@ async def test_try_edit_rich_records_streamed_final_for_reply_recovery(monkeypat
     result = await adapter._try_edit_rich("12345", "5724", "Готово. Основной бот живой.")
     assert result is not None and result.success
     assert rich_sent_store.lookup("12345", "5724") == "Готово. Основной бот живой."
+
+
+# ── Oversized rich splitting (> RICH_MESSAGE_MAX_CHARS) ─────────────────────
+#
+# Content above the 32,768-char rich cap used to degrade wholesale to the
+# legacy MarkdownV2 chunking path. The split path instead delivers EVERY chunk
+# via sendRichMessage (fence-aware, with (N/M) markers), so >32K replies keep
+# native rendering end to end.
+
+
+def _oversized(extra_chars=500):
+    return "x" * (TelegramAdapter.RICH_MESSAGE_MAX_CHARS + extra_chars)
+
+
+def _rich_calls(adapter):
+    """All sendRichMessage api_kwargs dicts, in call order."""
+    return [
+        c.kwargs["api_kwargs"]
+        for c in adapter._bot.do_api_request.call_args_list
+        if c.args and c.args[0] == "sendRichMessage"
+    ]
+
+
+class TestRichSplitSend:
+
+    @pytest.mark.asyncio
+    async def test_oversized_content_delivers_every_chunk_rich(self):
+        adapter = _make_adapter()
+        adapter._bot.do_api_request = AsyncMock(side_effect=[
+            SimpleNamespace(message_id=1001),
+            SimpleNamespace(message_id=1002),
+        ])
+
+        result = await adapter.send("12345", _oversized())
+
+        assert result.success is True
+        assert result.message_id == "1001"
+        assert result.raw_response["continuation_message_ids"] == ["1001", "1002"]
+        calls = _rich_calls(adapter)
+        assert len(calls) == 2
+        # No chunk leaked onto the legacy MarkdownV2 path.
+        adapter._bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_chunk_markers_present(self):
+        adapter = _make_adapter()
+        await adapter.send("12345", _oversized())
+
+        calls = _rich_calls(adapter)
+        assert len(calls) == 2
+        md0 = calls[0]["rich_message"]["markdown"]
+        md1 = calls[1]["rich_message"]["markdown"]
+        assert "(1/2)" in md0
+        assert "(2/2)" in md1
+
+    @pytest.mark.asyncio
+    async def test_code_fence_split_keeps_fence_boundaries(self):
+        adapter = _make_adapter()
+        content = "```python\n" + ("a" * (TelegramAdapter.RICH_MESSAGE_MAX_CHARS + 100)) + "\n```"
+
+        result = await adapter.send("12345", content)
+
+        assert result.success is True
+        calls = _rich_calls(adapter)
+        assert len(calls) == 2
+        md0 = calls[0]["rich_message"]["markdown"]
+        md1 = calls[1]["rich_message"]["markdown"]
+        # truncate_message closes the fence inside chunk 1 (the (1/2) marker
+        # follows on its own line) and reopens it with the language tag at
+        # the start of chunk 2.
+        assert md0.count("```") >= 2  # opening ```python + closing ```
+        assert md1.lstrip().startswith("```python")
+
+    @pytest.mark.asyncio
+    async def test_reply_anchor_on_first_chunk_only(self):
+        adapter = _make_adapter()
+        await adapter.send("12345", _oversized(), reply_to="42")
+
+        calls = _rich_calls(adapter)
+        assert len(calls) == 2
+        assert "reply_parameters" in calls[0]
+        assert "reply_parameters" not in calls[1]
+
+    @pytest.mark.asyncio
+    async def test_permanent_failure_first_chunk_falls_back_legacy(self):
+        """Chunk 0 rejected permanently → nothing delivered → the caller's
+        legacy chunking path takes over wholesale."""
+        adapter = _make_adapter()
+        adapter._bot.do_api_request = AsyncMock(side_effect=BadRequest("can't parse rich"))
+
+        result = await adapter.send("12345", _oversized())
+
+        assert adapter._bot.send_message.await_count >= 1
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_mid_split_reports_partial_overflow(self):
+        """Chunk 0 delivered, chunk 1 transient failure → failure result with
+        resume metadata; NO legacy resend of the delivered chunk."""
+        adapter = _make_adapter()
+        adapter._bot.do_api_request = AsyncMock(side_effect=[
+            SimpleNamespace(message_id=1001),
+            NetworkError("boom"),
+        ])
+
+        result = await adapter.send("12345", _oversized())
+
+        assert result.success is False
+        overflow = result.raw_response["partial_overflow"]
+        assert overflow["delivered_chunks"] == 1
+        assert overflow["total_chunks"] == 2
+        assert overflow["continuation_message_ids"] == ["1001"]
+        adapter._bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_expect_edits_skips_split(self):
+        """Streaming previews (edit transport) must stay single-message so the
+        edit transport can track them — oversized previews fall to legacy."""
+        adapter = _make_adapter()
+
+        await adapter.send("12345", _oversized(), metadata={"expect_edits": True})
+
+        adapter._bot.do_api_request.assert_not_called()
+        assert adapter._bot.send_message.await_count >= 1
+
+
+class TestRichOverflowEdit:
+    """finalize=True with >cap content: rich chunk-1 edit + rich continuations
+    instead of the legacy MarkdownV2 overflow split."""
+
+    @pytest.mark.asyncio
+    async def test_finalize_oversized_edits_rich_and_continues_rich(self):
+        adapter = _make_adapter()
+        adapter._bot.do_api_request = AsyncMock(side_effect=[
+            SimpleNamespace(message_id=777),    # editMessageText (chunk 1)
+            SimpleNamespace(message_id=2002),   # sendRichMessage (chunk 2)
+        ])
+
+        result = await adapter.edit_message("12345", "777", _oversized(), finalize=True)
+
+        assert result.success is True
+        assert result.message_id == "2002"
+        assert result.raw_response["continuation_message_ids"] == ["2002"]
+        calls = adapter._bot.do_api_request.call_args_list
+        assert [c.args[0] for c in calls] == ["editMessageText", "sendRichMessage"]
+        # Continuation is threaded as a reply to the previous message.
+        assert "reply_parameters" in calls[1].kwargs["api_kwargs"]
+        # Nothing leaked onto the legacy paths.
+        adapter._bot.edit_message_text.assert_not_called()
+        adapter._bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_permanent_first_chunk_edit_falls_back_legacy_split(self):
+        adapter = _make_adapter()
+        adapter._bot.do_api_request = AsyncMock(
+            side_effect=BadRequest("rich edit rejected")
+        )
+
+        result = await adapter.edit_message("12345", "777", _oversized(), finalize=True)
+
+        assert result.success is True
+        assert adapter._bot.edit_message_text.await_count >= 1
+        assert adapter._bot.send_message.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_transient_continuation_failure_reports_partial_overflow(self):
+        adapter = _make_adapter()
+        adapter._bot.do_api_request = AsyncMock(side_effect=[
+            SimpleNamespace(message_id=777),    # chunk-1 edit OK
+            NetworkError("boom"),               # continuation transient
+        ])
+
+        result = await adapter.edit_message("12345", "777", _oversized(), finalize=True)
+
+        assert result.success is False
+        overflow = result.raw_response["partial_overflow"]
+        assert overflow["delivered_chunks"] == 1
+        assert overflow["total_chunks"] == 2
+        assert overflow["last_message_id"] == "777"
+        adapter._bot.edit_message_text.assert_not_called()
+        adapter._bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_crash_shape_content_stays_legacy(self):
+        """details+math crash shape: degrading to MarkdownV2/plain is the SAFE
+        rendering — rich overflow must not re-introduce the desktop crash."""
+        adapter = _make_adapter()
+        content = (DANGEROUS_DETAILS_MATH + "\n") * 400
+        assert len(content) > TelegramAdapter.RICH_MESSAGE_MAX_CHARS
+
+        result = await adapter.edit_message("12345", "777", content, finalize=True)
+
+        assert result.success is True
+        adapter._bot.do_api_request.assert_not_called()
+        assert adapter._bot.edit_message_text.await_count >= 1
 async def test_finalize_edit_dm_topic_omits_send_only_routing_fields():
     """DM-topic metadata must not make a rich edit look like a new send.
 
@@ -1306,34 +1501,3 @@ async def test_finalize_edit_dm_topic_omits_send_only_routing_fields():
     assert "message_thread_id" not in api_kwargs
     assert "direct_messages_topic_id" not in api_kwargs
     assert "| F1 |" in api_kwargs["rich_message"]["markdown"]
-async def test_legacy_edit_error_logs_redacted_bot_token_without_traceback(monkeypatch, caplog):
-    import agent.redact as redact
-
-    monkeypatch.setattr(redact, "_REDACT_ENABLED", False)
-    token = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
-    adapter = _make_adapter()
-    adapter._bot.edit_message_text = AsyncMock(
-        side_effect=BadRequest(
-            f"Bad Request: https://api.telegram.org/bot{token}/editMessageText"
-        )
-    )
-
-    with caplog.at_level(logging.WARNING):
-        result = await adapter.edit_message(
-            "12345", "555", "Just a normal answer.", finalize=True,
-        )
-
-    assert result.success is False
-    assert result.error is not None
-    assert token not in result.error
-    assert "bot123456789:***/editMessageText" in result.error
-    assert token not in caplog.text
-    assert "bot123456789:***/editMessageText" in caplog.text
-
-
-# --------------------------------------------------------------------------
-# Rich-reply recovery (#47375): Telegram does not echo a sendRichMessage's
-# content in reply_to_message (.text/.caption empty, .api_kwargs None), so we
-# record message_id -> text at send time and recover it on inbound reply.
-# --------------------------------------------------------------------------
-

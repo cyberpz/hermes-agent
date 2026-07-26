@@ -2397,6 +2397,86 @@ class TelegramAdapter(BasePlatformAdapter):
             message_id=str(message_id) if message_id is not None else None,
         )
 
+    def _rich_split_eligible(self, content: str) -> bool:
+        """Oversized variant of :meth:`_rich_eligible` — every gate except the
+        size cap. Used to route >32K sends through rich chunking instead of
+        degrading the whole message to the legacy MarkdownV2 path."""
+        return bool(
+            self._rich_delivery_enabled()
+            and not getattr(self, "_rich_send_disabled", False)
+            and content
+            and content.strip()
+            and not self._has_telegram_desktop_details_math_crash_shape(content)
+            and not self._has_telegram_desktop_cjk_rich_garble_shape(content)
+            and not self._content_fits_rich_limits(content)
+            and self._bot_supports_rich()
+        )
+
+    async def _try_send_rich_split(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> Optional[SendResult]:
+        """Deliver >32K content as multiple ``sendRichMessage`` chunks.
+
+        Fence-aware splitting comes from ``truncate_message`` (which also
+        appends the ``(N/M)`` indicators); each chunk is then sent through the
+        same rich single-shot path, so tables/code/headings render natively on
+        EVERY chunk instead of only the first 32K.
+
+        Contract mirrors :meth:`_try_send_rich`:
+        - all chunks delivered → ``SendResult(success=True)`` with the first
+          message_id and ``raw_response["continuation_message_ids"]``
+        - permanent/capability failure on chunk 0 → ``None`` (nothing
+          delivered; caller falls back to the legacy chunking path wholesale)
+        - transient failure, or permanent failure after chunk 0 → failure
+          ``SendResult`` carrying ``raw_response["partial_overflow"]`` so the
+          consumer can resume the undelivered tail (no legacy resend of
+          already-delivered chunks — duplicate risk)
+        """
+        chunks = self.truncate_message(
+            content, self.RICH_MESSAGE_MAX_CHARS, len_fn=len
+        )
+        if len(chunks) <= 1:
+            return None  # not oversized under the rich metric — let the caller decide
+        chunks = [_separate_chunk_indicator_from_fence(c) for c in chunks]
+        message_ids: List[str] = []
+        for i, chunk in enumerate(chunks):
+            chunk_reply = reply_to if self._should_thread_reply(reply_to, i) else None
+            res = await self._try_send_rich(chat_id, chunk, chunk_reply, metadata)
+            if res is None:
+                if i == 0:
+                    return None
+                return SendResult(
+                    success=False,
+                    error=(
+                        f"rich split: permanent failure on chunk {i + 1}/{len(chunks)} "
+                        f"after {i} delivered"
+                    ),
+                    retryable=False,
+                    raw_response={"partial_overflow": {
+                        "delivered_chunks": i,
+                        "total_chunks": len(chunks),
+                        "continuation_message_ids": list(message_ids),
+                    }},
+                )
+            if not res.success:
+                res.raw_response = {**(res.raw_response or {}), "partial_overflow": {
+                    "delivered_chunks": i,
+                    "total_chunks": len(chunks),
+                    "continuation_message_ids": list(message_ids),
+                }}
+                return res
+            if res.message_id:
+                message_ids.append(res.message_id)
+        return SendResult(
+            success=True,
+            message_id=message_ids[0] if message_ids else None,
+            raw_response={"continuation_message_ids": message_ids},
+        )
+
     async def _try_edit_rich(
         self,
         chat_id: str,
@@ -5375,6 +5455,22 @@ class TelegramAdapter(BasePlatformAdapter):
                                 pass  # Typing failures are non-fatal
                     return rich_result
 
+            # Oversized rich (> RICH_MESSAGE_MAX_CHARS): split fence-aware and
+            # deliver EVERY chunk via sendRichMessage, so >32K replies keep
+            # native rendering instead of degrading wholesale to MarkdownV2.
+            # Skipped for streaming previews (expect_edits) — those must stay
+            # single-message so the edit transport can track them; >32K growth
+            # mid-stream is handled by the edit-overflow path instead.
+            if self._rich_split_eligible(content) and not (metadata or {}).get("expect_edits"):
+                split_result = await self._try_send_rich_split(chat_id, content, reply_to, metadata)
+                if split_result is not None:
+                    if split_result.success and not (metadata or {}).get("notify"):
+                        try:
+                            await self.send_typing(chat_id, metadata=metadata)
+                        except Exception:
+                            pass  # Typing failures are non-fatal
+                    return split_result
+
             # Format and split message if needed
             formatted = self.format_message(content)
             chunks = self.truncate_message(
@@ -5765,6 +5861,16 @@ class TelegramAdapter(BasePlatformAdapter):
             self._last_overflow_preview.pop(_preview_key, None)
         if utf16_len(content) > self.MAX_MESSAGE_LENGTH:
             if finalize:
+                # Rich overflow: keep native rendering across the whole split
+                # (chunk-1 rich edit + rich continuations) instead of
+                # degrading the final frame to MarkdownV2. Falls through to
+                # the legacy split on permanent/capability errors.
+                if self._rich_overflow_eligible(content):
+                    rich_overflow = await self._edit_overflow_split_rich(
+                        chat_id, message_id, content, metadata=metadata,
+                    )
+                    if rich_overflow is not None:
+                        return rich_overflow
                 return await self._edit_overflow_split(
                     chat_id, message_id, content, finalize=finalize, metadata=metadata,
                 )
@@ -5928,6 +6034,101 @@ class TelegramAdapter(BasePlatformAdapter):
             self.MAX_MESSAGE_LENGTH,
             len_fn=utf16_len,
         )[0]
+
+    def _rich_overflow_eligible(self, content: str) -> bool:
+        """Gate for the rich overflow-split of a >cap final edit.
+
+        Unlike :meth:`_rich_split_eligible` there is no size comparison (the
+        caller already knows the content exceeds the cap); the desktop crash /
+        garble shapes still force the legacy path because there the content
+        degrades to harmless MarkdownV2/plain instead of crashing the client.
+        """
+        return bool(
+            self._rich_delivery_enabled()
+            and not getattr(self, "_rich_send_disabled", False)
+            and content
+            and content.strip()
+            and not self._has_telegram_desktop_details_math_crash_shape(content)
+            and not self._has_telegram_desktop_cjk_rich_garble_shape(content)
+            and self._bot_supports_rich()
+        )
+
+    async def _edit_overflow_split_rich(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[SendResult]:
+        """Rich variant of :meth:`_edit_overflow_split` for >32K final edits.
+
+        Chunk 1 replaces the streamed preview via a rich ``editMessageText``;
+        remaining chunks are delivered as rich continuations threaded as
+        replies to the previous chunk — so an over-cap streamed answer
+        finalizes with native rendering on EVERY message instead of
+        degrading to MarkdownV2 at the last frame.
+
+        Contract mirrors :meth:`_try_send_rich_split`:
+        - permanent/capability failure on the first-chunk edit → ``None``
+          (nothing delivered; caller falls back to the legacy split)
+        - transient failure anywhere, or permanent failure on a continuation
+          → failure ``SendResult`` with ``raw_response["partial_overflow"]``
+        - full delivery → ``SendResult(success=True, message_id=<last id>)``
+          with ``raw_response["continuation_message_ids"]``
+        """
+        chunks = self.truncate_message(
+            content, self.RICH_MESSAGE_MAX_CHARS, len_fn=len
+        )
+        if len(chunks) <= 1:
+            chunks = [content]
+        chunks = [_separate_chunk_indicator_from_fence(c) for c in chunks]
+
+        # Step 1 — rich-edit the existing preview with chunk 1.
+        edit_res = await self._try_edit_rich(chat_id, message_id, chunks[0], metadata)
+        if edit_res is None:
+            return None
+        if not edit_res.success:
+            return edit_res
+
+        # Step 2 — rich continuations, each replying to the previous chunk.
+        continuation_ids: List[str] = []
+        prev_id = message_id
+        total = len(chunks)
+        for i, chunk in enumerate(chunks[1:], start=2):
+            res = await self._try_send_rich(chat_id, chunk, prev_id, metadata)
+            if res is None:
+                return SendResult(
+                    success=False,
+                    error=(
+                        f"rich overflow: permanent failure on chunk {i}/{total} "
+                        f"after {i - 1} delivered"
+                    ),
+                    retryable=False,
+                    raw_response={"partial_overflow": {
+                        "delivered_chunks": i - 1,
+                        "total_chunks": total,
+                        "last_message_id": prev_id,
+                        "continuation_message_ids": list(continuation_ids),
+                    }},
+                )
+            if not res.success:
+                res.raw_response = {**(res.raw_response or {}), "partial_overflow": {
+                    "delivered_chunks": i - 1,
+                    "total_chunks": total,
+                    "last_message_id": prev_id,
+                    "continuation_message_ids": list(continuation_ids),
+                }}
+                return res
+            if res.message_id:
+                continuation_ids.append(res.message_id)
+                prev_id = res.message_id
+
+        return SendResult(
+            success=True,
+            message_id=prev_id,
+            raw_response={"continuation_message_ids": continuation_ids},
+        )
 
     async def _edit_overflow_split(
         self,
