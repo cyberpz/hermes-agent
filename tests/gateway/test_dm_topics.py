@@ -21,18 +21,40 @@ from gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():
+    import enum
+
+    class _ParseMode(str, enum.Enum):
+        """Faithful PTB stand-in: str-Enum so ``repr(...)`` contains the
+        member name (asserted by tests) and ``== "MarkdownV2"`` string
+        comparisons still hold — like PTB's ``class ParseMode(str, Enum)``."""
+        MARKDOWN = "Markdown"
+        MARKDOWN_V2 = "MarkdownV2"
+        HTML = "HTML"
+
+    class _ChatType(str, enum.Enum):
+        PRIVATE = "private"
+        GROUP = "group"
+        SUPERGROUP = "supergroup"
+        CHANNEL = "channel"
+
     telegram_mod = MagicMock()
     telegram_mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
 
+    # Mirror PTB's exception hierarchy (BadRequest inherits NetworkError in
+    # python-telegram-bot 22.x) so isinstance()-based error classifiers in
+    # tests collected after this module still resolve real class semantics —
+    # plain auto-mocks are not classes and break ``except``/``isinstance``.
+    telegram_mod.error.TelegramError = type("TelegramError", (Exception,), {})
+    telegram_mod.error.NetworkError = type("NetworkError", (telegram_mod.error.TelegramError,), {})
+    telegram_mod.error.TimedOut = type("TimedOut", (telegram_mod.error.NetworkError,), {})
+    telegram_mod.error.BadRequest = type("BadRequest", (telegram_mod.error.NetworkError,), {})
+
     # Register telegram.constants as a separate module mock so that
     # ``from telegram.constants import ChatType`` resolves to our mock
-    # with string-valued members (not auto-generated MagicMocks).
+    # with faithful str-Enum members (not auto-generated MagicMocks).
     constants_mod = MagicMock()
-    constants_mod.ParseMode.MARKDOWN_V2 = "MarkdownV2"
-    constants_mod.ChatType.GROUP = "group"
-    constants_mod.ChatType.SUPERGROUP = "supergroup"
-    constants_mod.ChatType.CHANNEL = "channel"
-    constants_mod.ChatType.PRIVATE = "private"
+    constants_mod.ParseMode = _ParseMode
+    constants_mod.ChatType = _ChatType
 
     sys.modules["telegram"] = telegram_mod
     sys.modules["telegram.ext"] = telegram_mod.ext

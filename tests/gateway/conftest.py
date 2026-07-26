@@ -59,15 +59,27 @@ def _ensure_telegram_mock() -> None:
     if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
         return  # Real library is installed — nothing to mock
 
+    import enum
+
+    class _ParseMode(str, enum.Enum):
+        """Faithful PTB ParseMode stand-in: str-Enum so both
+        ``repr(ParseMode.MARKDOWN_V2)`` (contains 'MARKDOWN_V2', asserted by
+        several tests) and ``== "MarkdownV2"`` string comparisons hold —
+        matching python-telegram-bot's real ``class ParseMode(str, Enum)``."""
+        MARKDOWN = "Markdown"
+        MARKDOWN_V2 = "MarkdownV2"
+        HTML = "HTML"
+
+    class _ChatType(str, enum.Enum):
+        PRIVATE = "private"
+        GROUP = "group"
+        SUPERGROUP = "supergroup"
+        CHANNEL = "channel"
+
     mod = MagicMock()
     mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
-    mod.constants.ParseMode.MARKDOWN = "Markdown"
-    mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
-    mod.constants.ParseMode.HTML = "HTML"
-    mod.constants.ChatType.PRIVATE = "private"
-    mod.constants.ChatType.GROUP = "group"
-    mod.constants.ChatType.SUPERGROUP = "supergroup"
-    mod.constants.ChatType.CHANNEL = "channel"
+    mod.constants.ParseMode = _ParseMode
+    mod.constants.ChatType = _ChatType
 
     # Mirror PTB's exception hierarchy: BadRequest is a semantic API error,
     # but inherits from NetworkError in python-telegram-bot 22.x.
