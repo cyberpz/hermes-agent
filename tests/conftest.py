@@ -444,6 +444,27 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "DISCORD_REQUIRE_MENTION",
     "DISCORD_FREE_RESPONSE_CHANNELS",
     "TELEGRAM_REQUIRE_MENTION",
+    # Telegram behavioral envs read directly by the adapter
+    # (plugins/platforms/telegram/adapter.py os.getenv calls). On machines
+    # running a real gateway these leak from the service env and break
+    # otherwise-hermetic tests (e.g. TELEGRAM_ALLOWED_CHATS makes
+    # test_telegram_auth_check's group messages fail the whitelist gate).
+    "TELEGRAM_ALLOW_BOTS",
+    "TELEGRAM_ALLOWED_CHATS",
+    "TELEGRAM_ALLOWED_TOPICS",
+    "TELEGRAM_EXCLUSIVE_BOT_MENTIONS",
+    "TELEGRAM_FREE_RESPONSE_CHATS",
+    "TELEGRAM_FREE_RESPONSE_TOPICS",
+    "TELEGRAM_GROUP_ALLOWED_CHATS",
+    "TELEGRAM_GROUP_ALLOWED_USERS",
+    "TELEGRAM_GUEST_MODE",
+    "TELEGRAM_IGNORED_THREADS",
+    "TELEGRAM_MENTION_PATTERNS",
+    "TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES",
+    "TELEGRAM_PROXY",
+    "TELEGRAM_REACTIONS",
+    "TELEGRAM_REPLY_TO_MODE",
+    "TELEGRAM_WEBHOOK_URL",
     "WHATSAPP_REQUIRE_MENTION",
     "DINGTALK_REQUIRE_MENTION",
     "MATRIX_REQUIRE_MENTION",
