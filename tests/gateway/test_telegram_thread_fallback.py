@@ -77,6 +77,10 @@ _fake_telegram.Message = object
 _fake_telegram.InlineKeyboardButton = _FakeInlineKeyboardButton
 _fake_telegram.InlineKeyboardMarkup = _FakeInlineKeyboardMarkup
 _fake_telegram.InputMediaPhoto = _FakeInputMediaPhoto
+# Adapter module-level imports (upstream recently added LinkPreviewOptions
+# and MessageReactionHandler) — missing attributes make the whole telegram
+# import block fail and leave adapter.ChatType = None.
+_fake_telegram.LinkPreviewOptions = object
 _fake_telegram_error = types.ModuleType("telegram.error")
 _fake_telegram_error.NetworkError = FakeNetworkError
 _fake_telegram_error.BadRequest = FakeBadRequest
@@ -100,6 +104,7 @@ _fake_telegram_ext.Application = object
 _fake_telegram_ext.CommandHandler = object
 _fake_telegram_ext.CallbackQueryHandler = object
 _fake_telegram_ext.MessageHandler = object
+_fake_telegram_ext.MessageReactionHandler = object
 _fake_telegram_ext.TypeHandler = object
 _fake_telegram_ext.ContextTypes = SimpleNamespace(DEFAULT_TYPE=object)
 _fake_telegram_ext.filters = object
