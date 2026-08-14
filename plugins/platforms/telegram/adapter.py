@@ -10052,9 +10052,19 @@ class TelegramAdapter(BasePlatformAdapter):
             "[Telegram] Rich message fallback: extracted %d chars from api_kwargs for chat %s",
             len(extracted), getattr(getattr(msg, "chat", None), "id", "?"),
         )
-        # Inject extracted text so _handle_text_message can process it
-        msg.text = extracted
-        await self._handle_text_message(update, context)
+        # Build and enqueue event directly — don't re-inject into msg.text
+        # because PTB has already dispatched this update and the original
+        # handler chain won't re-process it.
+        if not self._is_user_authorized_from_message(msg):
+            logger.warning("[Telegram] Rich message fallback: unauthorized user")
+            return
+        if not self._should_process_message(msg):
+            return
+        event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
+        event.text = self._clean_bot_trigger_text(extracted)
+        await self._cache_replied_media(msg, event)
+        event = self._apply_telegram_group_observe_attribution(event)
+        self._enqueue_text_event(event)
 
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
