@@ -9938,6 +9938,24 @@ class TelegramAdapter(BasePlatformAdapter):
         return getattr(update, "effective_message", None) or getattr(update, "message", None)
 
     @staticmethod
+    def _extract_text_from_rich_content(content) -> str:
+        """Extract plain text from a rich content field which can be str, dict, or list."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            # Inline entity like {'type': 'url', 'text': 'https://...'}
+            inner = content.get("text", "")
+            if isinstance(inner, (str, dict, list)):
+                return TelegramAdapter._extract_text_from_rich_content(inner)
+            return str(inner) if inner else ""
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                parts.append(TelegramAdapter._extract_text_from_rich_content(item))
+            return "".join(parts)
+        return str(content) if content else ""
+
+    @staticmethod
     def _extract_text_from_rich_blocks(blocks: list) -> str:
         """Recursively extract plain text from Bot API 10.1+ rich message blocks."""
         parts: list[str] = []
@@ -9949,20 +9967,17 @@ class TelegramAdapter(BasePlatformAdapter):
             if btype in ("paragraph", "section_heading", "preformatted",
                          "footer", "block_quotation", "pull_quotation"):
                 text = block.get("text", "")
-                if isinstance(text, dict):
-                    # Nested RichText object — extract .text field
-                    text = text.get("text", "")
-                if text:
-                    parts.append(str(text))
+                extracted = TelegramAdapter._extract_text_from_rich_content(text)
+                if extracted:
+                    parts.append(extracted)
             elif btype == "list":
                 items = block.get("items", [])
                 for item in items:
                     if isinstance(item, dict):
                         sub = item.get("text", "") or item.get("content", "")
-                        if isinstance(sub, dict):
-                            sub = sub.get("text", "")
-                        if sub:
-                            parts.append(f"- {sub}")
+                        extracted = TelegramAdapter._extract_text_from_rich_content(sub)
+                        if extracted:
+                            parts.append(f"- {extracted}")
             elif btype == "table":
                 rows = block.get("rows", [])
                 for row in rows:
@@ -9970,9 +9985,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     cell_texts = []
                     for c in cells:
                         ct = c.get("text", "") if isinstance(c, dict) else str(c)
-                        if isinstance(ct, dict):
-                            ct = ct.get("text", "")
-                        cell_texts.append(str(ct))
+                        extracted = TelegramAdapter._extract_text_from_rich_content(ct)
+                        cell_texts.append(extracted)
                     if cell_texts:
                         parts.append(" | ".join(cell_texts))
             # Recurse into nested blocks (details, etc.)
@@ -10023,7 +10037,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if isinstance(blocks, list):
             extracted = self._extract_text_from_rich_blocks(blocks)
         elif isinstance(rich, dict):
-            extracted = rich.get("text", "") or rich.get("plain_text", "")
+            # rich_message can be {'blocks': [...]} or {'text': '...'}
+            rich_blocks = rich.get("blocks")
+            if isinstance(rich_blocks, list):
+                extracted = self._extract_text_from_rich_blocks(rich_blocks)
+            else:
+                extracted = rich.get("text", "") or rich.get("plain_text", "")
         elif isinstance(rich, str):
             extracted = rich
         if not extracted:
