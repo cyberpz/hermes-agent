@@ -4515,47 +4515,6 @@ class TelegramAdapter(BasePlatformAdapter):
         # it observes alongside, never displaces, the core handlers.
         app.add_handler(TypeHandler(Update, self._on_platform_update), group=99)
 
-    async def _handle_rich_message_fallback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Catch-all for Rich Messages that PTB doesn't parse natively.
-
-        Bot API 10.1+ messages may carry ``blocks`` or ``rich_message`` in
-        api_kwargs with ``text=None``. If the message already has text, or
-        is a known media type, this handler is a no-op (the specific handler
-        already processed it). Only when text is empty AND api_kwargs contain
-        rich content do we extract and re-route.
-        """
-        msg = self._effective_update_message(update)
-        if not msg:
-            return
-        # Skip if already handled by text/media/command handlers
-        if msg.text or msg.photo or msg.video or msg.audio or msg.voice or msg.document or msg.sticker:
-            return
-        api_kw = getattr(msg, "api_kwargs", None) or {}
-        blocks = api_kw.get("blocks")
-        rich = api_kw.get("rich_message")
-        if not blocks and not rich:
-            return
-        # Extract plain text from rich content
-        extracted = ""
-        if isinstance(blocks, list):
-            extracted = self._extract_text_from_rich_blocks(blocks)
-        elif isinstance(rich, dict):
-            extracted = rich.get("text", "") or rich.get("plain_text", "")
-        elif isinstance(rich, str):
-            extracted = rich
-        if not extracted:
-            logger.debug("[Telegram] Rich message fallback: no extractable text in api_kwargs")
-            return
-        logger.info(
-            "[Telegram] Rich message fallback: extracted %d chars from api_kwargs for chat %s",
-            len(extracted), getattr(getattr(msg, "chat", None), "id", "?"),
-        )
-        # Inject extracted text so _handle_text_message can process it
-        msg.text = extracted
-        await self._handle_text_message(update, context)
-
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Telegram via polling or webhook.
 
@@ -10021,6 +9980,62 @@ class TelegramAdapter(BasePlatformAdapter):
             if isinstance(nested, list) and nested:
                 parts.append(TelegramAdapter._extract_text_from_rich_blocks(nested))
         return "\n".join(parts)
+
+    async def _handle_rich_message_fallback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Catch-all for Rich Messages that PTB doesn't parse natively.
+
+        Bot API 10.1+ messages may carry ``blocks`` or ``rich_message`` in
+        api_kwargs with ``text=None``. If the message already has text, or
+        is a known media type, this handler is a no-op (the specific handler
+        already processed it). Only when text is empty AND api_kwargs contain
+        rich content do we extract and re-route.
+        """
+        msg = self._effective_update_message(update)
+        if not msg:
+            return
+        # Diagnostic: log ALL messages with api_kwargs to understand what arrives
+        api_kw = getattr(msg, "api_kwargs", None) or {}
+        if api_kw:
+            logger.info(
+                "[Telegram] RICH-FALLBACK DIAGNOSTIC: chat=%s text=%r api_kwargs_keys=%s",
+                getattr(getattr(msg, "chat", None), "id", "?"),
+                msg.text[:50] if msg.text else None,
+                list(api_kw.keys()),
+            )
+        # Skip if already handled by text/media/command handlers
+        if msg.text or msg.photo or msg.video or msg.audio or msg.voice or msg.document or msg.sticker:
+            return
+        api_kw = getattr(msg, "api_kwargs", None) or {}
+        blocks = api_kw.get("blocks")
+        rich = api_kw.get("rich_message")
+        if not blocks and not rich:
+            return
+        # Diagnostic: log the actual structure of rich_message
+        logger.info(
+            "[Telegram] RICH-FALLBACK STRUCTURE: rich type=%s blocks type=%s rich_preview=%r",
+            type(rich).__name__, type(blocks).__name__,
+            str(rich)[:200] if rich else None,
+        )
+        # Extract plain text from rich content
+        extracted = ""
+        if isinstance(blocks, list):
+            extracted = self._extract_text_from_rich_blocks(blocks)
+        elif isinstance(rich, dict):
+            extracted = rich.get("text", "") or rich.get("plain_text", "")
+        elif isinstance(rich, str):
+            extracted = rich
+        if not extracted:
+            logger.warning("[Telegram] Rich message fallback: no extractable text! rich=%r", str(rich)[:300])
+            return
+        logger.info(
+            "[Telegram] Rich message fallback: extracted %d chars from api_kwargs for chat %s",
+            len(extracted), getattr(getattr(msg, "chat", None), "id", "?"),
+        )
+        # Inject extracted text so _handle_text_message can process it
+        msg.text = extracted
+        await self._handle_text_message(update, context)
 
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
