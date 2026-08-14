@@ -9978,6 +9978,50 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         return getattr(update, "effective_message", None) or getattr(update, "message", None)
 
+    @staticmethod
+    def _extract_text_from_rich_blocks(blocks: list) -> str:
+        """Recursively extract plain text from Bot API 10.1+ rich message blocks."""
+        parts: list[str] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            # Text-bearing blocks
+            if btype in ("paragraph", "section_heading", "preformatted",
+                         "footer", "block_quotation", "pull_quotation"):
+                text = block.get("text", "")
+                if isinstance(text, dict):
+                    # Nested RichText object — extract .text field
+                    text = text.get("text", "")
+                if text:
+                    parts.append(str(text))
+            elif btype == "list":
+                items = block.get("items", [])
+                for item in items:
+                    if isinstance(item, dict):
+                        sub = item.get("text", "") or item.get("content", "")
+                        if isinstance(sub, dict):
+                            sub = sub.get("text", "")
+                        if sub:
+                            parts.append(f"- {sub}")
+            elif btype == "table":
+                rows = block.get("rows", [])
+                for row in rows:
+                    cells = row.get("cells", []) if isinstance(row, dict) else []
+                    cell_texts = []
+                    for c in cells:
+                        ct = c.get("text", "") if isinstance(c, dict) else str(c)
+                        if isinstance(ct, dict):
+                            ct = ct.get("text", "")
+                        cell_texts.append(str(ct))
+                    if cell_texts:
+                        parts.append(" | ".join(cell_texts))
+            # Recurse into nested blocks (details, etc.)
+            nested = block.get("blocks", [])
+            if isinstance(nested, list) and nested:
+                parts.append(TelegramAdapter._extract_text_from_rich_blocks(nested))
+        return "\n".join(parts)
+
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
 
