@@ -4503,9 +4503,58 @@ class TelegramAdapter(BasePlatformAdapter):
         ))
         # Handle inline keyboard button callbacks (update prompts)
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
+        # Catch-all for Rich Messages (Bot API 10.1+): PTB doesn't parse
+        # the ``blocks`` / ``rich_message`` fields yet, so they land in
+        # api_kwargs with text=None. Extract plain text and route through
+        # the normal text handler so the agent sees the content.
+        app.add_handler(TelegramMessageHandler(
+            filters.UpdateType.MESSAGE,
+            self._handle_rich_message_fallback,
+        ))
         # gateway_platform_event observer (see _on_platform_update); group 99 so
         # it observes alongside, never displaces, the core handlers.
         app.add_handler(TypeHandler(Update, self._on_platform_update), group=99)
+
+    async def _handle_rich_message_fallback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Catch-all for Rich Messages that PTB doesn't parse natively.
+
+        Bot API 10.1+ messages may carry ``blocks`` or ``rich_message`` in
+        api_kwargs with ``text=None``. If the message already has text, or
+        is a known media type, this handler is a no-op (the specific handler
+        already processed it). Only when text is empty AND api_kwargs contain
+        rich content do we extract and re-route.
+        """
+        msg = self._effective_update_message(update)
+        if not msg:
+            return
+        # Skip if already handled by text/media/command handlers
+        if msg.text or msg.photo or msg.video or msg.audio or msg.voice or msg.document or msg.sticker:
+            return
+        api_kw = getattr(msg, "api_kwargs", None) or {}
+        blocks = api_kw.get("blocks")
+        rich = api_kw.get("rich_message")
+        if not blocks and not rich:
+            return
+        # Extract plain text from rich content
+        extracted = ""
+        if isinstance(blocks, list):
+            extracted = self._extract_text_from_rich_blocks(blocks)
+        elif isinstance(rich, dict):
+            extracted = rich.get("text", "") or rich.get("plain_text", "")
+        elif isinstance(rich, str):
+            extracted = rich
+        if not extracted:
+            logger.debug("[Telegram] Rich message fallback: no extractable text in api_kwargs")
+            return
+        logger.info(
+            "[Telegram] Rich message fallback: extracted %d chars from api_kwargs for chat %s",
+            len(extracted), getattr(getattr(msg, "chat", None), "id", "?"),
+        )
+        # Inject extracted text so _handle_text_message can process it
+        msg.text = extracted
+        await self._handle_text_message(update, context)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Telegram via polling or webhook.
