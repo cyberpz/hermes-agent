@@ -2563,7 +2563,17 @@ class TelegramAdapter(BasePlatformAdapter):
             pass
         return SendResult(success=True, message_id=message_id)
 
-    def _should_attempt_rich_draft(self, content: str) -> bool:
+    def _should_attempt_rich_draft(self, content: str, chat_id: Optional[str] = None) -> bool:
+        # Disable rich drafts in groups/forums to reduce API call volume.
+        # Multi-session group chats exhaust Telegram's flood budget when
+        # each session sends rich draft frames independently. Rich finalize
+        # (editMessageText with rich_message) still works — only the
+        # ephemeral sendRichMessageDraft calls are suppressed.
+        if chat_id is not None:
+            _cid = str(chat_id).strip()
+            # Group/forum supergroups have negative chat IDs starting with -100
+            if _cid.startswith("-100"):
+                return False
         return bool(
             getattr(self, "_rich_messages_enabled", True)
             and getattr(self, "_rich_drafts_enabled", False)
@@ -6427,7 +6437,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # streaming preview with the same raw markdown the final
         # sendRichMessage will persist, so the animated draft matches the final
         # message. Any failure degrades to the legacy plain-text draft below.
-        if self._should_attempt_rich_draft(content):
+        if self._should_attempt_rich_draft(content, chat_id=chat_id):
             if await self._try_send_rich_draft(chat_id, draft_id, content, metadata):
                 # Drafts have no message_id; report success without one.
                 return SendResult(success=True, message_id=None)
