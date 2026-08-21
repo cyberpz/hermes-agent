@@ -4810,7 +4810,7 @@ class TurnRunner:
         progress_msg_id = None   # ID of the current progress message to edit
         can_edit = ctx.progress_grouping != "separate"  # "separate" = one message per tool (pre-v0.9 behavior)
         _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
-        _PROGRESS_EDIT_INTERVAL = 3.0  # Minimum seconds between edits (raised from 1.5 to reduce flood risk in groups)
+        _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
 
         _progress_len_fn = (
             adapter.message_len_fn
