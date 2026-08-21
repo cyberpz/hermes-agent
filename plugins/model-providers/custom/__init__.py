@@ -62,7 +62,17 @@ class CustomProfile(ProviderProfile):
                 # reasoning (#25758). Endpoints that recognize neither simply
                 # ignore them.
                 top_level["reasoning_effort"] = "none"
-                extra_body["think"] = False
+                # extra_body.think is Ollama-only. OpenAI-compatible endpoints
+                # (Purroxy/OAI lanes, vLLM, GLM/ARK) reject it with HTTP 400
+                # "Unknown parameter: 'think'". Only emit for local/Ollama
+                # endpoints (no base_url or localhost without /purr/oai path).
+                _base = str(ctx.get("base_url") or self.base_url or "").lower()
+                _is_local_ollama = not _base or (
+                    ("localhost" in _base or "127.0.0.1" in _base)
+                    and "/purr/oai" not in _base
+                )
+                if _is_local_ollama:
+                    extra_body["think"] = False
             elif _effort:
                 # Clamp the internal ladder onto the widest OpenAI-compatible
                 # wire vocabulary (shared policy in agent.reasoning_effort) —
