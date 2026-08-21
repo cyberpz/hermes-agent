@@ -1620,29 +1620,6 @@ class GatewayStreamConsumer:
         final_text = ensure_closed_code_fences(final_text)
         continuation = self._continuation_text(final_text)
         self._fallback_final_send = False
-
-        # ── Dedup guard: skip fallback send when content already visible ──
-        # In groups, flood control can promote to fallback mode after the
-        # last successful edit already delivered the full accumulated text.
-        # Without this check, _continuation_text() may return a non-empty
-        # string due to minor normalization differences (cursor strip,
-        # whitespace), causing a duplicate send of identical content.
-        _visible = self._visible_prefix()
-        if (
-            not continuation.strip()
-            and _visible.strip()
-            and final_text.strip() == _visible.strip()
-        ):
-            logger.info(
-                "Fallback dedup: final text matches visible prefix (%d chars), "
-                "skipping duplicate send",
-                len(final_text),
-            )
-            self._already_sent = True
-            self._final_response_sent = True
-            self._final_content_delivered = True
-            self._record_turn_final_payload(final_text)
-            return
         if not continuation.strip():
             # Some platforms treat a successful streaming preview as durable
             # delivery. Telegram clients can instead lose or retain only part
@@ -2676,16 +2653,12 @@ class GatewayStreamConsumer:
                             self._current_edit_interval = min(
                                 self._current_edit_interval * 2, 10.0,
                             )
-                            # INFO level for group-chat observability: flood
-                            # strikes are the primary cause of duplicate sends
-                            # in groups. DEBUG was invisible in production logs.
-                            logger.info(
+                            logger.debug(
                                 "Flood control on edit (strike %d/%d), "
-                                "backoff interval → %.1fs [chat=%s]",
+                                "backoff interval → %.1fs",
                                 self._flood_strikes,
                                 self._MAX_FLOOD_STRIKES,
                                 self._current_edit_interval,
-                                getattr(self, 'chat_id', '?'),
                             )
                             immediate_final_fallback = (
                                 finalize
@@ -2715,10 +2688,9 @@ class GatewayStreamConsumer:
                         # Non-flood error OR flood strikes exhausted: enter
                         # fallback mode — send only the missing tail once the
                         # final response is available.
-                        logger.info(
-                            "Edit failed (strikes=%d), entering fallback mode [chat=%s]",
+                        logger.debug(
+                            "Edit failed (strikes=%d), entering fallback mode",
                             self._flood_strikes,
-                            getattr(self, 'chat_id', '?'),
                         )
                         self._fallback_prefix = self._visible_prefix()
                         self._fallback_final_send = True

@@ -2332,12 +2332,9 @@ class TelegramAdapter(BasePlatformAdapter):
             # return_type=Message would make PTB deserialize a Bot API 10.1
             # response shape it does not fully model yet; a post-delivery parse
             # error must not be mistaken for a sendable failure.
-            import warnings as _warnings
-            with _warnings.catch_warnings():
-                _warnings.filterwarnings("ignore", message=".*do_api_request.*")
-                msg = await self._bot.do_api_request(
-                    "sendRichMessage", api_kwargs=payload
-                )
+            msg = await self._bot.do_api_request(
+                "sendRichMessage", api_kwargs=payload
+            )
         except Exception as exc:
             if self._is_rich_fallback_error(exc):
                 if self._is_rich_capability_error(exc):
@@ -2515,10 +2512,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # Raw Bot API result; do not request return_type=Message (PTB does
             # not fully model the 10.1 response shape yet — a post-edit parse
             # error must not be mistaken for a failed edit).
-            import warnings as _warnings
-            with _warnings.catch_warnings():
-                _warnings.filterwarnings("ignore", message=".*do_api_request.*editMessageText.*")
-                await self._bot.do_api_request("editMessageText", api_kwargs=payload)
+            await self._bot.do_api_request("editMessageText", api_kwargs=payload)
         except Exception as exc:
             if self._is_rich_fallback_error(exc):
                 if self._is_rich_capability_error(exc):
@@ -2599,10 +2593,7 @@ class TelegramAdapter(BasePlatformAdapter):
         }
         payload.update(self._thread_kwargs_for_draft(chat_id, metadata))
         try:
-            import warnings as _warnings
-            with _warnings.catch_warnings():
-                _warnings.filterwarnings("ignore", message=".*do_api_request.*")
-                ok = await self._bot.do_api_request("sendRichMessageDraft", api_kwargs=payload)
+            ok = await self._bot.do_api_request("sendRichMessageDraft", api_kwargs=payload)
             return bool(ok)
         except Exception as exc:
             if self._is_rich_capability_error(exc):
