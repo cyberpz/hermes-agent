@@ -791,10 +791,10 @@ def test_prefers_fresh_final_streaming_stays_disabled_when_rich_enabled():
 async def test_legacy_draft_stream_finalizes_with_persistent_rich_message():
     """A MarkdownV2 draft must not force the persistent final to MarkdownV2."""
     adapter = _make_adapter()  # rich messages on, rich drafts off
-    # With the gate in supports_draft_streaming, draft streaming is declined
-    # when rich_drafts is off.  The test force-enables it to verify that even
-    # a legacy MDV2 draft still finalizes as a rich message.
-    assert adapter.supports_draft_streaming(chat_type="dm") is False
+    # Upstream (Bot API 9.5+) enables draft streaming for all DM chats
+    # regardless of rich_drafts. The test verifies that even a legacy MDV2
+    # draft still finalizes as a rich message.
+    assert adapter.supports_draft_streaming(chat_type="dm") is True
 
     consumer = GatewayStreamConsumer(
         adapter,
@@ -820,10 +820,15 @@ async def test_legacy_draft_stream_finalizes_with_persistent_rich_message():
 # ----------------------------------------------------------------------
 
 
-def test_supports_draft_streaming_disabled_when_rich_without_rich_drafts():
+def test_supports_draft_streaming_enabled_for_dm_regardless_of_rich_drafts():
+    """Upstream (Bot API 9.5+) enables draft streaming for DM unconditionally.
+
+    rich_drafts controls the draft *format*, not availability. The old gate
+    that disabled draft streaming when rich was on but rich_drafts was off
+    has been removed upstream."""
     adapter = _make_adapter()  # rich_messages True, rich_drafts default False
-    assert adapter.supports_draft_streaming(chat_type="dm") is False
-    assert adapter.supports_draft_streaming(chat_type="private") is False
+    assert adapter.supports_draft_streaming(chat_type="dm") is True
+    assert adapter.supports_draft_streaming(chat_type="private") is True
 
 
 def test_supports_draft_streaming_enabled_when_rich_drafts_opt_in():
@@ -1470,6 +1475,31 @@ class TestRichOverflowEdit:
         assert result.success is True
         adapter._bot.do_api_request.assert_not_called()
         assert adapter._bot.edit_message_text.await_count >= 1
+
+
+# ----------------------------------------------------------------------
+# DM-topic routing constants (from upstream Bot API 9.5+ test suite)
+# ----------------------------------------------------------------------
+
+TOPIC_METADATA = {
+    "thread_id": "20189",
+    "telegram_dm_topic_reply_fallback": True,
+    "direct_messages_topic_id": "20189",
+    "telegram_reply_to_message_id": "42",
+}
+
+TOPIC_TABLE = (
+    "Here's a table:\n"
+    "\n"
+    "| Sport | Followed? | Notes |\n"
+    "|---|---|---|\n"
+    "| F1 | ✅ | |\n"
+    "| MLB | ✅ | |\n"
+    "| LoL | ✅ | |\n"
+)
+
+
+@pytest.mark.asyncio
 async def test_finalize_edit_dm_topic_omits_send_only_routing_fields():
     """DM-topic metadata must not make a rich edit look like a new send.
 

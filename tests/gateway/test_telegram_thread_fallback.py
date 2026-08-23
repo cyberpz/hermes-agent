@@ -876,8 +876,9 @@ async def test_send_dm_topic_fallback_without_anchor_does_not_crash():
 
     assert result.success is True
     assert call_log[0]["reply_to_message_id"] is None
-    assert call_log[0]["message_thread_id"] is None
-    assert call_log[0]["direct_messages_topic_id"] == 20197
+    # Upstream (Bot API 9.5+) routes DM-topic via message_thread_id only;
+    # direct_messages_topic_id is no longer passed as a separate kwarg.
+    assert call_log[0]["message_thread_id"] == 20197
 
 
 @pytest.mark.asyncio
