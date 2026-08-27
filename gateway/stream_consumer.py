@@ -1376,6 +1376,8 @@ class GatewayStreamConsumer:
                         self._stream_is_message()
                         and self._use_draft_streaming
                     ):
+                        pass
+                    else:
                         # If the segment-break edit failed to deliver the
                         # accumulated content (flood control that has not yet
                         # promoted to fallback mode, or fallback mode itself),
