@@ -1262,8 +1262,28 @@ class GatewayStreamConsumer:
                             # deleted the preview).  Running a second finalize
                             # edit here would duplicate the message / re-delete,
                             # so just record delivery and stop.
-                            self._final_content_delivered = True
-                            self._record_turn_final_payload(self._accumulated)
+                            #
+                            # SAFETY: if no update was visible this tick, the
+                            # prior finalize may have been a mid-stream edit
+                            # that succeeded on a PARTIAL snapshot.  The
+                            # accumulated text may have grown since then, so
+                            # force a reconciliation edit to ensure the complete
+                            # content reaches the user (#8124 follow-up).
+                            if not current_update_visible and self._message_id:
+                                _reconcile = await self._send_or_edit(
+                                    self._accumulated, finalize=True,
+                                )
+                                if _reconcile:
+                                    self._final_content_delivered = True
+                                    self._record_turn_final_payload(self._accumulated)
+                                else:
+                                    logger.warning(
+                                        "Reconciliation edit after stale finalize failed; "
+                                        "gateway will attempt normal final send.",
+                                    )
+                            else:
+                                self._final_content_delivered = True
+                                self._record_turn_final_payload(self._accumulated)
                         elif (
                             current_update_visible
                             and (
