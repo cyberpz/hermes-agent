@@ -308,15 +308,27 @@ class TestBeforeFinalizeHook:
 # ── Segment break (tool boundary) tests ──────────────────────────────────
 
 
-class TestMonoblockSegments:
-    """With a rich-capable adapter (Telegram rich_messages=True) and edit
-    transport, segment breaks must NOT spawn one bubble per text segment:
-    the same message keeps growing (monoblock per turn)."""
+class TestSegmentBreakOnToolBoundary:
+    """Verify segment-break behavior at tool boundaries.
 
-    def _make_rich_adapter(self):
+    Two modes exist:
+    - Monoblock (rich adapter, edit transport): _carry_segment_into_monoblock()
+      preserves _message_id and _accumulated so the same bubble keeps growing.
+    - Legacy (non-rich or draft streaming): _reset_segment_state() clears
+      _message_id so the next segment creates a fresh message.
+
+    Additionally, when an edit fails mid-stream and a tool boundary arrives
+    before fallback promotion, _flush_segment_tail_on_edit_failure() must
+    deliver the un-sent tail so text is not silently dropped (#8124).
+    """
+
+    # ── Monoblock mode ────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_monoblock_preserves_message_id_across_segment_break(self):
+        """With a rich adapter, segment break keeps the same message_id."""
         adapter = MagicMock()
-        adapter._rich_messages_enabled = True  # strict bool — enables monoblock
-        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter._rich_messages_enabled = True
         adapter.send = AsyncMock(
             return_value=SimpleNamespace(success=True, message_id="msg_1")
         )
@@ -324,64 +336,94 @@ class TestMonoblockSegments:
             return_value=SimpleNamespace(success=True, message_id="msg_1")
         )
         adapter.MAX_MESSAGE_LENGTH = 32768
-        return adapter
 
-    @pytest.mark.asyncio
-    async def test_segment_break_keeps_same_message(self):
-        """After a tool boundary, the next segment edits the SAME bubble."""
-        adapter = self._make_rich_adapter()
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
-        consumer.on_delta("Let me search for that...")
-        consumer.on_delta(None)  # tool boundary
-        consumer.on_delta("Here are the results.")
+        consumer.on_delta("Before tool.")
+        consumer.on_delta(None)  # segment break
+        consumer.on_delta("After tool.")
         consumer.finish()
 
         await consumer.run()
 
-        # ONE send only — never a second bubble for the second segment.
+        # Only ONE send — the second segment edits the same message.
         assert adapter.send.call_count == 1
-        # The final edit must contain BOTH segments (message keeps growing).
-        final_edit = adapter.edit_message.call_args_list[-1][1]["content"]
-        assert "search" in final_edit
-        assert "results" in final_edit
+        # Final edit contains both segments (monoblock accumulation).
+        final_content = adapter.edit_message.call_args_list[-1][1]["content"]
+        assert "Before tool." in final_content
+        assert "After tool." in final_content
 
     @pytest.mark.asyncio
-    async def test_multiple_segment_breaks_stay_monoblock(self):
-        """Several tool boundaries → still ONE message."""
-        adapter = self._make_rich_adapter()
+    async def test_monoblock_multiple_tool_boundaries_single_message(self):
+        """Multiple segment breaks with rich adapter → still one message."""
+        adapter = MagicMock()
+        adapter._rich_messages_enabled = True
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 32768
+
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
-        consumer.on_delta("First part.")
+        consumer.on_delta("Part A.")
         consumer.on_delta(None)
-        consumer.on_delta("Second part.")
+        consumer.on_delta("Part B.")
         consumer.on_delta(None)
-        consumer.on_delta("Third part.")
+        consumer.on_delta("Part C.")
         consumer.finish()
 
         await consumer.run()
 
         assert adapter.send.call_count == 1
-        final_edit = adapter.edit_message.call_args_list[-1][1]["content"]
-        assert "First" in final_edit
-        assert "Second" in final_edit
-        assert "Third" in final_edit
+        final_content = adapter.edit_message.call_args_list[-1][1]["content"]
+        for part in ("Part A.", "Part B.", "Part C."):
+            assert part in final_content
 
     @pytest.mark.asyncio
-    async def test_non_rich_adapter_keeps_legacy_segment_behavior(self):
-        """Non-rich adapters keep the upstream one-bubble-per-segment flow."""
+    async def test_monoblock_archives_delivered_segment_text(self):
+        """_carry_segment_into_monoblock archives finalized text for dedup."""
+        adapter = MagicMock()
+        adapter._rich_messages_enabled = True
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 32768
+
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("First segment text.")
+        consumer.on_delta(None)  # triggers _carry_segment_into_monoblock
+        consumer.on_delta("Second segment.")
+        consumer.finish()
+
+        await consumer.run()
+
+        # The first segment's text was archived for has_delivered_text.
+        assert consumer.has_delivered_text("First segment text.")
+
+    # ── Legacy (non-monoblock) mode ───────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_legacy_segment_break_creates_new_message(self):
+        """Non-rich adapter: segment break resets state, spawns new message."""
         adapter = MagicMock()
         adapter._rich_messages_enabled = False
-        adapter.REQUIRES_EDIT_FINALIZE = False
-        adapter.send = AsyncMock(
-            side_effect=[
-                SimpleNamespace(success=True, message_id="msg_1"),
-                SimpleNamespace(success=True, message_id="msg_2"),
-            ]
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="msg_1"),
+            SimpleNamespace(success=True, message_id="msg_2"),
+        ])
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True)
         )
-        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
@@ -394,71 +436,99 @@ class TestMonoblockSegments:
 
         await consumer.run()
 
+        # Two separate sends — one per segment.
         assert adapter.send.call_count == 2
 
-
-# ── Segment break (tool boundary) tests ──────────────────────────────────
-
-
-class TestSegmentBreakOnToolBoundary:
-    """Verify that on_delta(None) finalizes the current message and starts a
-    new one so the final response appears below tool-progress messages."""
-
-
     @pytest.mark.asyncio
-    async def test_segment_break_removes_cursor(self):
-        """The finalized segment message should not have a cursor."""
+    async def test_legacy_segment_break_resets_final_flags(self):
+        """_reset_segment_state clears _final_response_sent so a premature
+        setter can't fool the gateway after a tool boundary (#29346)."""
         adapter = MagicMock()
-        send_result = SimpleNamespace(success=True, message_id="msg_1")
-        edit_result = SimpleNamespace(success=True)
-        adapter.send = AsyncMock(return_value=send_result)
-        adapter.edit_message = AsyncMock(return_value=edit_result)
+        adapter._rich_messages_enabled = False
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="msg_1"),
+            SimpleNamespace(success=True, message_id="msg_2"),
+        ])
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True)
+        )
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉")
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("Pre-tool text.")
+        consumer.on_delta(None)  # segment break → resets flags
+        consumer.on_delta("Post-tool answer.")
+        consumer.finish()
+
+        await consumer.run()
+
+        # After run completes, final_response_sent reflects the LAST segment.
+        assert consumer.final_response_sent is True
+        # But the delivered_segment_texts recorded the pre-tool segment.
+        assert any("Pre-tool" in t for t in consumer._delivered_segment_texts)
+
+    # ── Cursor stripping on segment break ─────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_segment_break_finalizes_without_cursor(self):
+        """The finalized segment at a tool boundary must not show the cursor."""
+        adapter = MagicMock()
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True)
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, cursor=" ▉"
+        )
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Thinking...")
-        consumer.on_delta(None)
+        consumer.on_delta(None)  # segment break → finalize without cursor
         consumer.on_delta("Done.")
         consumer.finish()
 
         await consumer.run()
 
-        # The first segment should have been finalized without cursor.
-        # Check all edit_message calls + the initial send for the first segment.
-        # The last state of msg_1 should NOT have the cursor.
+        # Collect all texts sent/edited for the first segment.
         all_texts = []
         for call in adapter.send.call_args_list:
             all_texts.append(call[1].get("content", ""))
         for call in adapter.edit_message.call_args_list:
             all_texts.append(call[1].get("content", ""))
 
-        # Find the text(s) that contain "Thinking" — the finalized version
-        # should not have the cursor.
         thinking_texts = [t for t in all_texts if "Thinking" in t]
         assert thinking_texts, "Expected at least one message with 'Thinking'"
-        # The LAST occurrence is the finalized version
+        # The finalized version must not contain the cursor character.
         assert "▉" not in thinking_texts[-1], (
-            f"Cursor found in finalized segment: {thinking_texts[-1]!r}"
+            f"Cursor leaked into finalized segment: {thinking_texts[-1]!r}"
         )
 
+    # ── Flush tail on edit failure (#8124) ────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_segment_break_clears_failed_edit_fallback_state(self):
-        """A tool boundary after edit failure must flush the undelivered tail
-        without duplicating the prefix the user already saw (#8124)."""
+    async def test_flush_tail_delivers_unsent_text_at_segment_break(self):
+        """When edits fail and a tool boundary arrives, the un-sent tail
+        must be flushed as a new message — not silently dropped (#8124)."""
         adapter = MagicMock()
-        send_results = [
+        adapter.send = AsyncMock(side_effect=[
             SimpleNamespace(success=True, message_id="msg_1"),
             SimpleNamespace(success=True, message_id="msg_2"),
             SimpleNamespace(success=True, message_id="msg_3"),
-        ]
-        adapter.send = AsyncMock(side_effect=send_results)
-        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=False, error="flood_control:6"))
+        ])
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=False, error="flood_control:6")
+        )
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉")
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, cursor=" ▉"
+        )
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Hello")
@@ -466,44 +536,39 @@ class TestSegmentBreakOnToolBoundary:
         await asyncio.sleep(0.08)
         consumer.on_delta(" world")
         await asyncio.sleep(0.08)
-        consumer.on_delta(None)
+        consumer.on_delta(None)  # tool boundary → flush tail
         consumer.on_delta("Next segment")
         consumer.finish()
         await task
 
         sent_texts = [call[1]["content"] for call in adapter.send.call_args_list]
-        # The undelivered "world" tail must reach the user, and the next
-        # segment must not duplicate "Hello" that was already visible.
+        # The undelivered "world" tail must reach the user.
         assert sent_texts == ["Hello ▉", "world", "Next segment"]
 
     @pytest.mark.asyncio
-    async def test_segment_break_after_mid_stream_edit_failure_preserves_tail(self):
-        """Regression for #8124: when an earlier edit succeeded but later edits
-        fail (persistent flood control) and a tool boundary arrives before the
-        fallback threshold is reached, the pre-boundary tail must still be
-        delivered — not silently dropped by the segment reset."""
+    async def test_flush_tail_after_persistent_flood_control(self):
+        """Regression #8124: when earlier edits succeeded but later ones fail
+        (persistent flood), the pre-boundary tail must still be delivered."""
         adapter = MagicMock()
-        # msg_1 for the initial partial, msg_2 for the flushed tail,
-        # msg_3 for the post-boundary segment.
-        send_results = [
+        adapter.send = AsyncMock(side_effect=[
             SimpleNamespace(success=True, message_id="msg_1"),
             SimpleNamespace(success=True, message_id="msg_2"),
             SimpleNamespace(success=True, message_id="msg_3"),
-        ]
-        adapter.send = AsyncMock(side_effect=send_results)
-
-        # First two edits succeed, everything after fails with flood control
-        # — simulating Telegram's "edit once then get rate-limited" pattern.
+        ])
+        # First edit succeeds, everything after fails.
         edit_results = [
-            SimpleNamespace(success=True),   # "Hello world ▉"  — succeeds
-            SimpleNamespace(success=False, error="flood_control:6.0"),  # "Hello world more ▉" — flood triggered
-            SimpleNamespace(success=False, error="flood_control:6.0"),  # finalize edit at segment break
-            SimpleNamespace(success=False, error="flood_control:6.0"),  # cursor-strip attempt
+            SimpleNamespace(success=True),
+            SimpleNamespace(success=False, error="flood_control:6.0"),
+            SimpleNamespace(success=False, error="flood_control:6.0"),
         ]
-        adapter.edit_message = AsyncMock(side_effect=edit_results + [edit_results[-1]] * 10)
+        adapter.edit_message = AsyncMock(
+            side_effect=edit_results + [edit_results[-1]] * 10
+        )
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉")
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, cursor=" ▉"
+        )
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Hello")
@@ -514,25 +579,23 @@ class TestSegmentBreakOnToolBoundary:
         consumer.on_delta(" more")
         await asyncio.sleep(0.08)
         consumer.on_delta(None)  # tool boundary
-        consumer.on_delta("Here is the tool result.")
+        consumer.on_delta("Tool result here.")
         consumer.finish()
         await task
 
         sent_texts = [call[1]["content"] for call in adapter.send.call_args_list]
-        # "more" must have been delivered, not dropped.
         all_text = " ".join(sent_texts)
         assert "more" in all_text, (
             f"Pre-boundary tail 'more' was silently dropped: sends={sent_texts}"
         )
-        # Post-boundary text must also reach the user.
-        assert "Here is the tool result." in all_text
+        assert "Tool result here." in all_text
 
+    # ── Fallback final at tool boundary ───────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_fallback_final_sends_full_text_at_tool_boundary(self):
-        """After a tool call, the streamed prefix is stale (from the pre-tool
-        segment).  _send_fallback_final must still send the post-tool response
-        even when continuation_text calculates as empty (#10807)."""
+    async def test_fallback_final_sends_post_tool_response(self):
+        """After a tool call, _send_fallback_final must deliver the post-tool
+        response even when continuation_text calculates as empty (#10807)."""
         adapter = MagicMock()
         adapter.send = AsyncMock(
             return_value=SimpleNamespace(success=True, message_id="msg_1"),
@@ -545,45 +608,29 @@ class TestSegmentBreakOnToolBoundary:
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
-        # Simulate a pre-tool streamed segment that becomes the visible prefix
         pre_tool_text = "I'll run that code now."
         consumer.on_delta(pre_tool_text)
         task = asyncio.create_task(consumer.run())
         await asyncio.sleep(0.05)
 
-        # After the tool call, the model returns a SHORT final response that
-        # does NOT start with the pre-tool prefix.  The continuation calculator
-        # would return empty (no prefix match → full text returned, but if the
-        # streaming edit already showed pre_tool_text, the prefix-based logic
-        # wrongly matches).  Simulate this by setting _last_sent_text to the
-        # pre-tool content, then finishing with different post-tool content.
         consumer._last_sent_text = pre_tool_text
         post_tool_response = "⏰ Script timed out after 30s and was killed."
         consumer.finish()
         await task
 
-        # The fallback should send the post-tool response via
-        # _send_fallback_final.
         await consumer._send_fallback_final(post_tool_response)
 
-        # Verify the final text was sent (not silently dropped)
-        sent = False
-        for call in adapter.send.call_args_list:
-            content = call[1].get("content", call[0][0] if call[0] else "")
-            if "timed out" in str(content):
-                sent = True
-                break
+        sent = any(
+            "timed out" in str(call[1].get("content", ""))
+            for call in adapter.send.call_args_list
+        )
         assert sent, (
-            "Post-tool timeout response was silently dropped by "
-            "_send_fallback_final — the #10807 fix should prevent this"
+            "Post-tool timeout response was silently dropped (#10807)"
         )
 
     @pytest.mark.asyncio
     async def test_fallback_final_deletes_partial_after_full_resend(self):
-        """After fallback re-sends the COMPLETE response, the frozen partial
-        must be deleted so the user sees only the complete response (#16668).
-        Full resend happens when the visible prefix doesn't match the final
-        text (e.g. post-segment-break content, #10807)."""
+        """After full resend, the frozen partial must be deleted (#16668)."""
         adapter = MagicMock()
         adapter.send = AsyncMock(
             return_value=SimpleNamespace(success=True, message_id="msg_new"),
@@ -597,8 +644,6 @@ class TestSegmentBreakOnToolBoundary:
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
-        # The stale partial shows pre-tool text that is NOT a prefix of the
-        # final response — fallback re-sends the complete final text.
         consumer._message_id = "msg_partial"
         consumer._last_sent_text = "Let me check that for you…"
 
@@ -609,10 +654,7 @@ class TestSegmentBreakOnToolBoundary:
 
     @pytest.mark.asyncio
     async def test_fallback_final_keeps_partial_after_tail_only_send(self):
-        """When the fallback sends only the missing TAIL (visible prefix
-        matches the final text), the partial message IS the head of the
-        answer — deleting it would leave the user with only the last part
-        of the response (the 'model sent only the second half' bug)."""
+        """Tail-only fallback must NOT delete the head-bearing partial."""
         adapter = MagicMock()
         adapter.send = AsyncMock(
             return_value=SimpleNamespace(success=True, message_id="msg_new"),
@@ -626,22 +668,272 @@ class TestSegmentBreakOnToolBoundary:
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
-        # Visible partial is a true prefix of the final response — the
-        # fallback dedup sends only the tail.
         consumer._message_id = "msg_partial"
         consumer._last_sent_text = "Working on i"
 
         await consumer._send_fallback_final("Working on it. Done!")
 
-        # Tail was sent...
         sent_contents = [
             c.kwargs.get("content", "") for c in adapter.send.call_args_list
         ]
         assert any("Done!" in s and "Working on i" not in s for s in sent_contents)
-        # ...and the head-bearing partial was NOT deleted.
         adapter.delete_message.assert_not_awaited()
         assert consumer._final_response_sent is True
 
+
+# ── Reconciliation edit on stale finalize (90cecdbca5) ────────────────────
+
+
+class TestReconciliationOnStaleFinalize:
+    """Regression coverage for 90cecdbca5 — when got_done arrives with
+    _final_response_sent=True (set by a mid-stream edit, not the got_done
+    tick) and current_update_visible=False, the consumer must force a
+    reconciliation edit to ensure the complete accumulated content reaches
+    the user. Without this, a prior finalize that succeeded on a PARTIAL
+    snapshot leaves the user with an incomplete message while the gateway
+    suppresses its normal final send.
+
+    Conditions that trigger reconciliation:
+      got_done=True
+      AND _final_response_sent=True (from earlier tick)
+      AND current_update_visible=False (no update ran this tick)
+      AND _message_id is not None
+    """
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_edit_fires_when_stale_finalize_detected(self):
+        """When _final_response_sent=True but no visible update on got_done,
+        a reconciliation finalize=True edit must be issued."""
+        adapter = MagicMock()
+        adapter.REQUIRES_EDIT_FINALIZE = False
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        # All edits succeed.
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, cursor=" ▉"
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        # Stream some initial text — this will be sent and edited.
+        consumer.on_delta("Initial partial text")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.08)
+
+        # Simulate the scenario: a prior mid-stream edit set
+        # _final_response_sent=True (as if a fresh-final fired earlier).
+        # Then more text arrives but the edit interval prevents a visible
+        # update on the got_done tick.
+        consumer._final_response_sent = True
+        consumer._final_content_delivered = False
+        consumer.on_delta(" plus additional content that grew the buffer")
+        # Make the edit interval very long so no mid-stream edit fires
+        # between this delta and finish().
+        consumer._current_edit_interval = 999.0
+        await asyncio.sleep(0.02)
+        consumer.finish()
+        await task
+
+        # The reconciliation path should have called edit_message with
+        # finalize=True to deliver the complete accumulated content.
+        finalize_edits = [
+            c for c in adapter.edit_message.call_args_list
+            if c[1].get("finalize") is True
+        ]
+        assert len(finalize_edits) >= 1, (
+            "Expected at least one finalize=True reconciliation edit"
+        )
+        # The reconciliation edit must carry the full accumulated text.
+        last_finalize_content = finalize_edits[-1][1]["content"]
+        assert "additional content" in last_finalize_content
+        # And delivery flags must be set after successful reconciliation.
+        assert consumer._final_content_delivered is True
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_failure_leaves_content_undelivered(self):
+        """When the reconciliation edit fails, _final_content_delivered must
+        stay False so the gateway attempts its own normal final send.
+
+        The specific scenario: _send_or_edit succeeded with is_turn_final=True
+        on a prior tick (setting _final_response_sent=True but NOT
+        _final_content_delivered). Then more text arrived, and on got_done
+        no visible update ran. The reconciliation edit must fire, and if it
+        fails, _final_content_delivered must remain False."""
+        adapter = MagicMock()
+        adapter.REQUIRES_EDIT_FINALIZE = False
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+
+        # Track calls to distinguish mid-stream vs reconciliation edits.
+        edit_calls = []
+
+        async def tracking_edit(**kwargs):
+            edit_calls.append(kwargs)
+            if kwargs.get("finalize") is True:
+                # Reconciliation finalize fails.
+                return SimpleNamespace(success=False, error="flood_control:30")
+            return SimpleNamespace(success=True, message_id="msg_1")
+
+        adapter.edit_message = AsyncMock(side_effect=tracking_edit)
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, cursor=" ▉"
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("Partial text")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.08)
+
+        # Simulate: a prior _send_or_edit with is_turn_final=True set
+        # _final_response_sent=True but did NOT set _final_content_delivered.
+        # This mirrors line 2349-2350 of stream_consumer.py.
+        consumer._final_response_sent = True
+        # _final_content_delivered stays False (the key precondition).
+        assert consumer._final_content_delivered is False
+
+        # Add substantially different text so the accumulated content does
+        # NOT match the visible prefix — this prevents the cursor-strip
+        # optimization at line 2617-2631 from setting _final_content_delivered
+        # inside _send_or_edit itself.
+        consumer.on_delta("\n\nCompletely new paragraph with different content.")
+        # Prevent mid-stream edits from firing before finish(): both the
+        # interval AND the buffer threshold must block edits.
+        consumer._current_edit_interval = 999.0
+        consumer.cfg.buffer_threshold = 999_999
+        await asyncio.sleep(0.02)
+        consumer.finish()
+        await task
+
+        # Reconciliation failed → _final_content_delivered stays False.
+        assert consumer._final_content_delivered is False, (
+            "_final_content_delivered must stay False when reconciliation "
+            "edit fails, so the gateway can attempt its own final send"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_reconciliation_when_update_was_visible(self):
+        """When current_update_visible=True on got_done, the normal
+        skip-redundant path records delivery without a reconciliation edit."""
+        adapter = MagicMock()
+        adapter.REQUIRES_EDIT_FINALIZE = False
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, cursor=""
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        # Small text that fits in one edit cycle — the got_done tick will
+        # produce a visible update (the finalize edit itself).
+        consumer.on_delta("Complete answer")
+        consumer.finish()
+
+        await consumer.run()
+
+        # Delivery was recorded normally.
+        assert consumer._final_content_delivered is True
+        assert consumer._final_response_sent is True
+
+    @pytest.mark.asyncio
+    async def test_no_reconciliation_when_no_message_id(self):
+        """Without a _message_id, the reconciliation branch is skipped
+        (nothing to edit). Falls through to the no-message-id path."""
+        adapter = MagicMock()
+        adapter.REQUIRES_EDIT_FINALIZE = False
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, cursor=""
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        # Force stale-finalize precondition but clear message_id.
+        consumer._final_response_sent = True
+        consumer._final_content_delivered = False
+        consumer._message_id = None
+
+        consumer.on_delta("Some text")
+        consumer.finish()
+
+        await consumer.run()
+
+        # Without _message_id, the reconciliation branch is not entered.
+        # The consumer falls through to the elif not self._already_sent path
+        # or the elif self._message_id path (which is also False here).
+        # Either way, delivery flags reflect what actually happened.
+        # The key assertion: no crash, and the consumer completed.
+        assert consumer._already_sent is True
+
+
+# ── Flush tail in else branch (3f89b742da) ───────────────────────────────
+
+
+class TestFlushTailInElseBranch:
+    """Regression coverage for 3f89b742da — the flush-tail logic at segment
+    break must run inside the ELSE branch (non stream-is-message adapters),
+    not unconditionally. Stream-is-message adapters with draft streaming
+    preserve all state across tool boundaries; flushing their tail would
+    corrupt the cumulative native stream.
+    """
+
+    @pytest.mark.asyncio
+    async def test_edit_transport_flushes_tail_on_segment_break(self):
+        """Edit-transport (non stream-is-message) must flush un-sent tail
+        before resetting segment state at a tool boundary."""
+        adapter = MagicMock()
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="msg_1"),
+            SimpleNamespace(success=True, message_id="msg_2"),
+            SimpleNamespace(success=True, message_id="msg_3"),
+        ])
+        # All edits fail → accumulated text never becomes visible after
+        # the initial send, so the flush must deliver it.
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=False, error="flood_control:6")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, cursor=" ▉"
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("Visible")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.08)
+        consumer.on_delta(" hidden tail")
+        await asyncio.sleep(0.08)
+        consumer.on_delta(None)  # segment break → flush tail
+        consumer.on_delta("New segment")
+        consumer.finish()
+        await task
+
+        sent_texts = [c[1]["content"] for c in adapter.send.call_args_list]
+        all_text = " ".join(sent_texts)
+        # The hidden tail must have been flushed.
+        assert "hidden tail" in all_text, (
+            f"Flush tail did not deliver un-sent text: {sent_texts}"
+        )
 
 class TestFinalResponseDeliveryGuard:
     """Regression coverage for #10748 — _final_response_sent must reflect
