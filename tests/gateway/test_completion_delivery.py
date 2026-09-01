@@ -247,6 +247,45 @@ def test_explicit_kill_returns_output_before_consuming_notification(monkeypatch)
     adapter.handle_message.assert_not_awaited()
 
 
+def test_wait_consumed_notify_on_complete_still_injects_agent_summary(monkeypatch):
+    """wait/log may suppress raw output, never the requested agent summary."""
+    import tools.process_registry as pr_module
+
+    registry = ProcessRegistry()
+    session = ProcessSession(
+        id="proc_wait_consumed",
+        command="python long_task.py",
+        task_id="task",
+        started_at=1.0,
+        output_buffer="verification passed\n",
+        exited=True,
+        exit_code=0,
+        notify_on_complete=True,
+    )
+    registry._finished[session.id] = session
+    registry._completion_consumed.add(session.id)
+    monkeypatch.setattr(pr_module, "process_registry", registry)
+
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+    asyncio.run(runner._run_process_watcher({
+        "session_id": session.id,
+        "check_interval": 0,
+        "session_key": "agent:main:telegram:dm:123",
+        "platform": "telegram",
+        "chat_type": "dm",
+        "chat_id": "123",
+        "notify_on_complete": True,
+    }))
+
+    adapter.handle_message.assert_awaited_once()
+
+
 def test_process_tool_redacts_explicit_kill_output(monkeypatch):
     from tools import process_registry as pr_module
 
