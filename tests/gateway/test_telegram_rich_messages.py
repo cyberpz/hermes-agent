@@ -634,7 +634,7 @@ def test_prefers_fresh_final_streaming_stays_disabled_when_rich_enabled():
     assert adapter.prefers_fresh_final_streaming(RICH_CONTENT, None) is False
 
 
-def test_prefers_fresh_final_streaming_for_dm_topic_tables():
+def test_prefers_fresh_final_streaming_for_dm_topics_preserves_preview():
     adapter = _make_adapter()
     topic_meta = {
         "thread_id": "20189",
@@ -642,20 +642,14 @@ def test_prefers_fresh_final_streaming_for_dm_topic_tables():
         "direct_messages_topic_id": "20189",
         "telegram_reply_to_message_id": "42",
     }
-    assert adapter.prefers_fresh_final_streaming(RICH_CONTENT, topic_meta) is True
-    # Fork: Rich Text is the default for ALL content (Bot API 10.1+), so even
-    # plain sentences are rich-eligible and prefer fresh final streaming on
-    # DM topics (avoids table degradation on the edit-in-place fallback path).
-    assert adapter.prefers_fresh_final_streaming("Just a sentence.", topic_meta) is True
+    assert adapter.prefers_fresh_final_streaming(RICH_CONTENT, topic_meta) is False
+    assert adapter.prefers_fresh_final_streaming("Just a sentence.", topic_meta) is False
     assert adapter.prefers_fresh_final_streaming(
         RICH_CONTENT, {"direct_messages_topic_id": "20189"}
-    ) is True
-    # The documented telegram_-prefixed alias is honored through the same
-    # canonical accessor the send path uses (gateway/delivery.py treats the
-    # two keys as equivalent) — an alias-only lane must not flatten tables.
+    ) is False
     assert adapter.prefers_fresh_final_streaming(
         RICH_CONTENT, {"telegram_direct_messages_topic_id": "20189"}
-    ) is True
+    ) is False
 
 
 @pytest.mark.asyncio

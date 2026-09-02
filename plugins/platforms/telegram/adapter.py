@@ -2151,25 +2151,14 @@ class TelegramAdapter(BasePlatformAdapter):
     def prefers_fresh_final_streaming(
         self, content: str, metadata: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Whether to replace a streamed preview with a fresh rich final.
+        """Finalize Telegram streams in place.
 
-        Root DMs keep this off (#46206 / #47048): successful draft streaming
-        has no preview ``message_id``, so the hook is not consulted, and
-        in-place ``editMessageText.rich_message`` would duplicate a live draft
-        turn.  Private DM *topics* often reject ``sendMessageDraft``; the
-        consumer then degrades to edit-in-place. Telegram rejects a rich edit
-        of that plain MarkdownV2 preview, and the fallback formatter
-        permanently turns pipe tables into bullet lists.  Fresh
-        ``sendRichMessage`` plus deleting the preview is the remaining way to
-        keep native tables on that degraded path.
+        A fresh final send followed by preview deletion makes readable content
+        disappear while the user is reading it. Rich edits are supported by
+        Bot API 10.1+, so preserving the existing message is both stable and
+        fully formatted.
         """
-        metadata = metadata or {}
-        if not (
-            metadata.get("telegram_dm_topic_reply_fallback")
-            or self._metadata_direct_messages_topic_id(metadata)
-        ):
-            return False
-        return self._rich_eligible(content)
+        return False
 
     def streaming_overflow_limit(self) -> Optional[int]:
         """Allow the stream consumer to accumulate up to the rich-message cap
