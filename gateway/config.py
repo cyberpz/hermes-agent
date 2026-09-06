@@ -1078,34 +1078,34 @@ def load_gateway_config() -> GatewayConfig:
                         "disable_topic_auto_rename",
                         telegram_cfg["disable_topic_auto_rename"],
                     )
-                # Prefer telegram.require_mention; fall back to the top-level shorthand.
+                # Bridge telegram config into platform extra (single source of truth: config.yaml)
+                _tg_plat = platforms_data.setdefault(Platform.TELEGRAM.value, {})
+                _tg_extra = _tg_plat.setdefault("extra", {})
+                
                 _effective_rm = telegram_cfg.get("require_mention", yaml_cfg.get("require_mention"))
-                if _effective_rm is not None and not os.getenv("TELEGRAM_REQUIRE_MENTION"):
-                    os.environ["TELEGRAM_REQUIRE_MENTION"] = str(_effective_rm).lower()
-                if "mention_patterns" in telegram_cfg and not os.getenv("TELEGRAM_MENTION_PATTERNS"):
-                    os.environ["TELEGRAM_MENTION_PATTERNS"] = json.dumps(telegram_cfg["mention_patterns"])
-                if "exclusive_bot_mentions" in telegram_cfg and not os.getenv("TELEGRAM_EXCLUSIVE_BOT_MENTIONS"):
-                    os.environ["TELEGRAM_EXCLUSIVE_BOT_MENTIONS"] = str(telegram_cfg["exclusive_bot_mentions"]).lower()
-                if "guest_mode" in telegram_cfg and not os.getenv("TELEGRAM_GUEST_MODE"):
-                    os.environ["TELEGRAM_GUEST_MODE"] = str(telegram_cfg["guest_mode"]).lower()
-                if "observe_unmentioned_group_messages" in telegram_cfg and not os.getenv("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES"):
-                    os.environ["TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES"] = str(telegram_cfg["observe_unmentioned_group_messages"]).lower()
+                if _effective_rm is not None:
+                    _tg_extra["require_mention"] = _effective_rm
+                _mention_patterns = telegram_cfg.get("mention_patterns")
+                if _mention_patterns is not None:
+                    _tg_extra["mention_patterns"] = _mention_patterns
+                _exclusive_bot_mentions = telegram_cfg.get("exclusive_bot_mentions")
+                if _exclusive_bot_mentions is not None:
+                    _tg_extra["exclusive_bot_mentions"] = _exclusive_bot_mentions
+                _guest_mode = telegram_cfg.get("guest_mode")
+                if _guest_mode is not None:
+                    _tg_extra["guest_mode"] = _guest_mode
+                _observe_unmentioned = telegram_cfg.get("observe_unmentioned_group_messages")
+                if _observe_unmentioned is not None:
+                    _tg_extra["observe_unmentioned_group_messages"] = _observe_unmentioned
                 frc = telegram_cfg.get("free_response_chats")
-                if frc is not None and not os.getenv("TELEGRAM_FREE_RESPONSE_CHATS"):
-                    if isinstance(frc, list):
-                        frc = ",".join(str(v) for v in frc)
-                    os.environ["TELEGRAM_FREE_RESPONSE_CHATS"] = str(frc)
-                # allowed_chats: if set, bot ONLY responds in these group chats (whitelist)
+                if frc is not None:
+                    _tg_extra["free_response_chats"] = frc
                 ac = telegram_cfg.get("allowed_chats")
-                if ac is not None and not os.getenv("TELEGRAM_ALLOWED_CHATS"):
-                    if isinstance(ac, list):
-                        ac = ",".join(str(v) for v in ac)
-                    os.environ["TELEGRAM_ALLOWED_CHATS"] = str(ac)
+                if ac is not None:
+                    _tg_extra["allowed_chats"] = ac
                 allowed_topics = telegram_cfg.get("allowed_topics")
-                if allowed_topics is not None and not os.getenv("TELEGRAM_ALLOWED_TOPICS"):
-                    if isinstance(allowed_topics, list):
-                        allowed_topics = ",".join(str(v) for v in allowed_topics)
-                    os.environ["TELEGRAM_ALLOWED_TOPICS"] = str(allowed_topics)
+                if allowed_topics is not None:
+                    _tg_extra["allowed_topics"] = allowed_topics
                 ignored_threads = telegram_cfg.get("ignored_threads")
                 if ignored_threads is not None and not os.getenv("TELEGRAM_IGNORED_THREADS"):
                     if isinstance(ignored_threads, list):
