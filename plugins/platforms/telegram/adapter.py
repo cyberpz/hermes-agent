@@ -563,6 +563,11 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         # Bot API 10.3 is_compact: rewrite GFM tables as <table compact> rich HTML (opt-in, like every
         # other rich feature; off keeps the plain-markdown table path upstream tests pin).
         self._rich_compact_tables: bool = self._coerce_bool_extra("rich_compact_tables", False)
+        # Opt-in native Stop button while a draft is streaming (Bot API 10.3 can_stop / keep_on_stop
+        # on sendMessageDraft / sendRichMessageDraft). Default OFF: the Stop button changes the
+        # streaming UX, and the tap arrives as a stopped_message_generation update that the
+        # installed PTB keeps in Update.api_kwargs (no typed field yet).
+        self._rich_draft_stop: bool = self._coerce_bool_extra("rich_draft_stop", False)
         self._rich_send_disabled = self._rich_draft_disabled = False  # latched after a capability failure
         # Transient sendChatAction failures recur on every keep-typing tick; back off per chat.
         self._telegram_typing_cooldown_until: dict[str, float] = {}
@@ -1205,6 +1210,18 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             return {"link_preview_options": LinkPreviewOptions(is_disabled=True)}
         return {"disable_web_page_preview": True}
 
+    def _draft_stop_kwargs(self) -> dict[str, bool]:
+        """Bot API 10.3 Stop-button fields for draft sends (``rich_draft_stop`` opt-in).
+
+        Returns ``{}`` when disabled so draft payloads stay byte-identical to the pre-10.3
+        behaviour (upstream tests pin the current payloads). When enabled, the plain draft
+        transport switches to raw ``do_api_request`` because the installed PTB's typed
+        ``send_message_draft`` declares no ``can_stop`` field.
+        """
+        if not getattr(self, "_rich_draft_stop", False):
+            return {}
+        return {"can_stop": True, "keep_on_stop": True}
+
     # --- Bot API 10.1 Rich Messages (sendRichMessage): final/new-message replies opportunistically send
     # RAW agent markdown so tables, task lists, <details>, math render natively; legacy MarkdownV2 send()
     # is the fallback. Streaming edits stay on the MarkdownV2 edit path.
@@ -1504,6 +1521,7 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         payload: dict[str, Any] = {
             "chat_id": normalize_telegram_chat_id(chat_id), "draft_id": int(draft_id), "rich_message": self._rich_message_payload(content)}
         payload.update(self._thread_kwargs_for_draft(chat_id, metadata))
+        payload.update(self._draft_stop_kwargs())
         try:
             return bool(await _await_with_thread_deadline(
                 self._bot.do_api_request("sendRichMessageDraft", api_kwargs=payload),
@@ -2625,6 +2643,13 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         admission = getattr(self, "_update_admission", None)
         if admission is None or admission.get() is None:
             self._updates_dispatched_total = getattr(self, "_updates_dispatched_total", 0) + 1
+        if getattr(self, "_rich_draft_stop", False):
+            # Bot API 10.3 native Stop tap on a streaming draft: no sender to authorize,
+            # consumed here so it never reaches the platform-event auth boundary.
+            stopped = self._stopped_message_generation_payload(update)
+            if stopped is not None:
+                self._handle_stopped_message_generation(stopped)
+                return
         handler: Optional[Callable[[dict[str, Any], Any], Awaitable[None]]] = getattr(self, "_platform_event_handler", None)
         if handler is None:
             return
@@ -2647,6 +2672,40 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         except Exception:
             self._fail_update_preparation()
             logger.debug("[%s] gateway_platform_event dispatch error", self.name, exc_info=True)
+
+    @staticmethod
+    def _stopped_message_generation_payload(update) -> Optional[Any]:
+        """Bot API 10.3 ``stopped_message_generation`` payload (user tapped the draft Stop button).
+
+        The installed PTB has no typed field, so the raw dict lands in ``Update.api_kwargs``;
+        a future PTB may expose it as a native attribute. Returns ``None`` for every other
+        update type.
+        """
+        payload = getattr(update, "stopped_message_generation", None)
+        if payload is None:
+            api_kwargs = getattr(update, "api_kwargs", None)
+            getter = getattr(api_kwargs, "get", None)
+            if callable(getter):  # PTB exposes api_kwargs as a mappingproxy, not a dict
+                payload = getter("stopped_message_generation")
+        return payload
+
+    def _handle_stopped_message_generation(self, payload: Any) -> None:
+        """Best-effort handling of a native Stop tap on a streaming draft.
+
+        The adapter does not own the streamed turn (the gateway core does) and has no
+        per-chat cancel handle here, so this is log-only by design — the next inbound
+        user message supersedes the stopped turn as usual. Handled before the
+        platform-event auth boundary because this update type carries no sender to
+        authorize; forwarding it would fail-close the update for no reason.
+        """
+        chat_id = None
+        if isinstance(payload, dict):
+            chat = payload.get("chat")
+            chat_id = payload.get("chat_id") or (chat.get("id") if isinstance(chat, dict) else None)
+        else:
+            chat = getattr(payload, "chat", None)
+            chat_id = getattr(payload, "chat_id", None) or getattr(chat, "id", None)
+        logger.debug("[%s] user stopped message generation (chat=%s)", self.name, chat_id)
 
     def _source_for_platform_event_auth(self, update):
         """Route a supported update to its event-specific auth-source extractor (reactor / editor);
