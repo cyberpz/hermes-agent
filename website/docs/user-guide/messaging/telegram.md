@@ -1256,6 +1256,18 @@ The same setting applies to sends made outside the gateway process: `hermes send
 
 CJK text (Chinese, Japanese, Korean, and rare Han extensions) stays on the legacy MarkdownV2 path by default because affected Telegram Desktop/macOS clients have rendered Bot API rich messages with overlapping CJK glyph artifacts. If you use an unaffected client and prefer native rich tables/task lists/details/math for CJK payloads, set `allow_cjk_rich_messages: true` alongside `rich_messages: true` to opt in to that client-side risk.
 
+**Clarify buttons.** A `clarify` prompt renders one numbered button per choice and repeats the full option text in the message body, because a phone clips long button labels. That reads well for a question with prose answers and badly for a menu: a section navigator whose buttons read "1", "2", "3" tells the user nothing.
+
+```yaml
+platforms:
+  telegram:
+    extra:
+      clarify_label_buttons: true   # buttons carry the choice text
+      clarify_other_row: false      # drop the "✏️ Other (type answer)" row
+```
+
+With `clarify_label_buttons: true` each button shows its own choice text. The tap still resolves by position (`cl:<id>:<idx>`), so the answer the agent receives is identical — only what the user reads changes. Hermes falls back to the numbered keyboard whenever a label would exceed Telegram's 64-character button limit, a label is blank, or there are more than 8 choices: a clipped label silently changes what an option says, which is worse than a number. `clarify_other_row: false` removes the fallback row for menus where the choices are the whole answer space; typing a free answer still works, since the prompt's text intercept is independent of the keyboard.
+
 **Link previews.** Telegram auto-generates link previews for URLs in bot messages. If you'd rather suppress those (long `/tools` output, agent reply that mentions ten links, etc.):
 
 ```yaml

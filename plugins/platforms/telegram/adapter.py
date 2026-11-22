@@ -178,6 +178,7 @@ _MEDIA_KIND_KEYS = {
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from plugins.platforms.telegram.telegram_audio_meta import (
     _coerce_duration_seconds, _probe_video_geometry, _probe_voice_duration_seconds, _video_thumbnail_jpeg, audio_player_fields)
+from plugins.platforms.telegram.telegram_clarify_buttons import clarify_rows
 from plugins.platforms.telegram.telegram_dm_topic_send import dead_topic_may_reroute, dead_topic_retry_kwargs, private_chat, topic_gone
 from plugins.platforms.telegram.telegram_entities import (
     addressing_sources, addressing_text, expand_link_entities, expand_quote_link_entities, rich_message_filter, rich_message_text)
@@ -3887,15 +3888,14 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             text = f"❓ {_html.escape(question)}"
             keyboard = None
             if choices:
-                # Full option text in the body (mobile truncates button labels); buttons keep numeric labels.
                 text += "\n\n" + "\n".join(f"{i + 1}. {_html.escape(str(c))}" for i, c in enumerate(choices))
                 if multi := multi_prompt_extras(self, clarify_id, len(choices)):  # toggles + Send (#154195)
                     text, keyboard = text + multi[0], multi[1]
                 else:
-                    # Telegram caps callback_data at 64 bytes; keep "cl:<id>:<idx>" short.
-                    rows = [[InlineKeyboardButton(str(idx + 1), callback_data=f"cl:{clarify_id}:{idx}")] for idx in range(len(choices))]
-                    rows.append([InlineKeyboardButton(t("platform.telegram.prompt.other"), callback_data=f"cl:{clarify_id}:other")])
-                    keyboard = InlineKeyboardMarkup(rows)
+                    keyboard = InlineKeyboardMarkup(clarify_rows(
+                        choices, clarify_id, other_label=t("platform.telegram.prompt.other"),
+                        label_buttons=self._coerce_bool_extra("clarify_label_buttons", False),
+                        other_row=self._coerce_bool_extra("clarify_other_row", True)))
             return text, keyboard, lambda msg: self._clarify_state.__setitem__(clarify_id, ClarifyPrompt.from_sent(session_key, msg))
         return await self._send_prompt(
             "send_clarify", chat_id, metadata, build, parse_mode=ParseMode.HTML, thread_id=self._metadata_thread_id(metadata))
